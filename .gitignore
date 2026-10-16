@@ -27,3 +27,4 @@ htmlcov/
 
 # Browser-automation output
 .playwright-mcp/
+data/

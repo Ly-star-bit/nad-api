@@ -91,6 +91,11 @@ code { font-family: var(--mono); font-size: .92em; }
 .opts { display: flex; flex-wrap: wrap; gap: 8px 26px; margin-top: 12px; font-size: 13.5px; color: var(--ink-2); }
 .opts label { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
 .opts input { accent-color: var(--ink); width: 15px; height: 15px; margin: 0; }
+.opts select {
+  font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--rule); border-radius: 0;
+  padding: 3px 4px; max-width: 12em; cursor: pointer;
+}
+.opts select:focus { outline: none; box-shadow: 0 0 0 3px var(--focus); border-color: var(--ink-2); }
 
 .keyrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 14px; font-size: 13.5px; }
 .keyrow label { font-weight: 600; }

@@ -1,7 +1,7 @@
 # NAD Address Verification API
 
 基于 **USDOT National Address Database（NAD）** 的免费美国地址校验接口（FastAPI），
-NAD 查不到时用 **Overture Maps 地址数据** 兜底。
+NAD 查不到时用 **Overture Maps 地址数据** 兜底。**欧洲和日本**的地址查各国官方地址登记（见[欧洲和日本](#欧洲和日本)）。
 不需要下载 40 GB 全量数据，也不需要任何 API Key / 账号 —— 所有上游都是公开免费服务。
 
 | 上游 | 用途 | 说明 |
@@ -69,6 +69,57 @@ OpenAddresses 里各县/市的原始数据，正好补上这些空白。实测�
 - 没有位置就无法兜底：纯 `geocode_failed`（无 ZIP）不会查 Overture —— 无 bbox 的属性查询要扫 27 GB。
   带 `zip_fallback=true` 时用 ZIP 范围作为 bbox。
 
+## 欧洲和日本
+
+请求带 `country`（ISO 代码或国名，如 `DE`、`Germany`、`德国`），或者地址末尾写了国家名（`..., 10117 Berlin, Germany`），
+或者是日文地址时，按该国的数据源核对；都没有时按美国处理（地址末尾的 `DE`、`MD`、`Georgia` 是美国州，不会被当成国家）。
+`GET /countries` 列出支持的国家和各自的数据源。返回结构和美国一样，另带 `country` 和 `provider`
+（数据源名称、`authority`、许可证和需要展示的署名）。
+
+每个国家按顺序问数据源，前一个出错（或在该地区没有数据）才问下一个：
+
+| 国家 | 数据源 | 说明 |
+|---|---|---|
+| 法国 | BAN（IGN Géoplateforme 地理编码） | 不存在的门牌返回街道，不会给邻近门牌 |
+| 荷兰 | BAG（PDOK Locatieserver） | 有邮编时用精确过滤；字母和附加号（`8-H`、`1A`）按单元核对 |
+| 比利时 | 弗拉芒：Digitaal Vlaanderen 地址登记（含 bus 单元号）；瓦隆：ICAR geocodeWS | 按邮编分区。布鲁塞尔的 UrbIS 限制商业使用，改用 Overture 里的联邦 BeST 数据 |
+| 卢森堡 | geoportail.lu（BD-Adresses） | |
+| 瑞士 | 联邦建筑地址目录（geo.admin.ch 搜索） | 不存在的门牌会返回邻近门牌，作为同街建议 |
+| 奥地利 | BEV 地址登记（地籍查看器背后的搜索） | 不是公开文档的接口，失效时自动改用 Overture |
+| 西班牙 | CartoCiudad（IGN） | 邮编不能放进查询，单独比对 |
+| 挪威 | Kartverket 地址登记 | 字母属于门牌（`11A`），单元号是 H 编号（`H0201`） |
+| 芬兰 | Syke Ryhti 建筑地址登记 | 芬兰语或瑞典语街名；门牌区间（`11-13`）包含 12 |
+| 冰岛 | HMS 地址登记（WFS） | 需要冰岛字母 |
+| 爱沙尼亚 | In-ADS（Maa- ja Ruumiamet） | 含公寓号（`Narva mnt 7-1`） |
+| 拉脱维亚 | VZD 国家地址登记（data.gov.lv） | 需要拉脱维亚字母；不带时自动改用 Overture |
+| 波兰 | PRG（GUGiK） | 需要城市。机构的邮政编码常和登记里的不同，邮编不一致只作提示 |
+| 捷克 | RÚIAN（ČÚZK） | `151/1a`（建筑号/方位号）写哪一个都能对上 |
+| 斯洛文尼亚 | GURS 门牌登记 | 没有街名的村庄用村名代替街名 |
+| 德国、意大利、葡萄牙、丹麦、立陶宛、斯洛伐克、克罗地亚、塞尔维亚、列支敦士登、法罗群岛 | Overture Maps（这些国家的官方开放地址登记），先用 Photon（OpenStreetMap 搜索）找到街道位置 | 德国缺巴伐利亚，那里改用 OpenStreetMap |
+| 英国、爱尔兰、瑞典、希腊、匈牙利、罗马尼亚等 | OpenStreetMap（Photon）；英国邮编另用 postcodes.io 核对 | 这些国家没有免费的官方门牌接口。OSM 社区数据，找到门牌算核实（置信度 0.75），找不到门牌**不算证据**：返回 `not_covered`（无法判断），只有连街道都找不到才是 `not_found` |
+| 日本 | 国土地理院住所検索 + 日本邮政邮编表 | 见下 |
+
+所有数据源找到“东西”都不直接算数：门牌（含字母）、街道名、邮编都和输入重新比对，因为多数服务对不存在的门牌会返回
+街道或邻近门牌。街道名比对会去掉重音、展开各语言的缩写（`Str.`、`bd`、`ul.`、`gt` 等），罗马数字、数字和数词视为相同
+（意大利登记写 `Via Venti Settembre`，用户写 `Via XX Settembre`），双语街名（布鲁塞尔 `Grote Markt - Grand-Place`）分开比。
+邮编不一致时照样核实，但标出（和美国的 ZIP 一样，页面会提示正确邮编）。
+
+**日本**：地址是“町 + 丁目 + 番（街区）+ 号（建筑）”，国土地理院返回它知道的最深一级，比对规则：
+
+- 号也对上：`verified`；只对上番（东京都心大部分地方没有号的数据）：`verified` + `match_level: "block"`，页面显示“已核实到番”，
+  号无法核实；丁目存在但没有这个番：`street_only`；町存在但没有这个丁目：`not_found`；
+  乡下用地番（`978-6`）而国土地理院只到町名的地方：`not_covered`。
+- 罗马字地址（`2-8-1 Nishi-Shinjuku, Shinjuku-ku, Tokyo 163-8001`）国土地理院读不了：用日本邮政的邮编表（含罗马字）
+  把邮编或町名、区市名换成汉字再查。邮编表启动时下载到 `NAD_DATA_DIR`（默认 `data/`，约 3 MB），每月更新。
+- 带邮编时核对邮编是否属于这个町，不属于时给出正确邮编。
+- 房间号、楼名（`101号室`、`5F`、`-101`）会去掉。
+- 国土地理院这个检索接口是它自己地图网站用的，没有承诺长期提供。
+
+**注意**：以上都是在美国 IP 上测试的。部署到其他地区后请跑一遍 `scripts/smoke_test.py`（含每个国家的用例），
+看哪些数据源从服务器上连不通。斯洛伐克、塞尔维亚、立陶宛的官方接口只对部分国家的 IP 开放，所以这三个国家直接用 Overture。
+Photon 公共实例只要求“合理使用”（并发限制在 2），大批量使用请自建 Photon 并设置 `PHOTON_URL`；
+公共 Nominatim 的使用政策禁止地址校验类服务，所以没有使用。
+
 ## 启动
 
 ```bash
@@ -90,10 +141,11 @@ docker build -t nad-api . && docker run -p 8000:8000 nad-api
 - `http://<host>:8000/batch`：批量校验，一次最多 500 行。可以每行粘贴一个地址、从 Excel 复制多列，或上传 CSV
   （表头 `address`，或 `street` / `unit` / `city` / `state` / `zip`，也认中文表头；UTF-8 / GBK 均可）。
   订单导出里带前缀的列名（`Shipping Address 1`、`Ship City`、`收件人地址`、`收货城市` 等）也能识别。
+  各国地址可以混在一起：有 `country`（“国家”）列时按它，否则按地址末尾的国家名或日文识别，其余按页面上选的默认国家。
   页面按每批 20 条调用 `/v1/verify/batch?stream=true`，每条查完立刻显示（不用等同批最慢的那条），可停止、继续、
   重试失败行；地图按结论着色显示每一行（没有匹配记录时用 Census 定位点），跟随筛选，点圆点看详情。
   导出 CSV 时原表的列原样保留，后面追加 `verify_status`、`verify_verdict`、`verify_confidence`、`verify_matched_address`、
-  `verify_nearest_number`（门牌不存在时同街最近的门牌）、`verify_census_matches`（Census 匹配到多个地址时的个数）、`verify_zip_should_be`（填的 ZIP 和记录不一致时，
+  `verify_country`、`verify_nearest_number`（门牌不存在时同街最近的门牌）、`verify_census_matches`（Census 匹配到多个地址时的个数）、`verify_zip_should_be`（填的 ZIP 和记录不一致时，
   记录里的 ZIP；地址存在但 ZIP 填错会让包裹分错，结果行里也会标出来）等结果列。
   有 10 行以上结果还没导出就离开页面时，浏览器会提示。
 - 页头的状态点显示各上游最近一次调用的结果，例如服务器连不上 Census 时会显示“Census 地理编码不可用”，
@@ -118,7 +170,8 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
   -d '{"street":"11 W Washington St","unit":"Suite 240","city":"Phoenix","state":"AZ","zip":"85003"}'
 ```
 
-参数（长度上限：`address` 300、`street` 200 个字符，超出返回 422）：`address`（单行）或 `street`+`city`/`state`/`zip`（结构化）；可选 `unit`、`lat`+`lon`（跳过地理编码）、
+参数（长度上限：`address` 300、`street` 200 个字符，超出返回 422）：`address`（单行）或 `street`+`city`/`state`/`zip`（结构化）；可选 `country`（见[欧洲和日本](#欧洲和日本)，
+不支持的国家返回 422）、`unit`、`lat`+`lon`（跳过地理编码）、
 `zip_fallback`（Census 编码失败时在整个 ZIP 区域搜索，较慢 3–20 s）、`overture_fallback`（默认 `true`）、`max_candidates`。
 
 返回要点：
@@ -127,9 +180,10 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 {
   "status": "verified",          // 见下表
   "verified": true,
-  "match_level": "unit",         // unit | address | street | null
+  "match_level": "unit",         // unit | address | block（日本：只核实到番）| street | null
   "confidence": 0.997,
-  "data_source": "nad",          // nad | overture | null —— 最终结论来自哪个数据集
+  "data_source": "nad",          // nad | overture | null —— 最终结论来自哪个数据集；美国以外是数据源代码（fr_ban、jp_gsi、osm …）
+  "country": "US",               // 美国以外另带 "provider": {"name", "authority", "license", "attribution"}
   "nad_status": "verified",      // 仅 NAD 的结论（兜底前）
   "fallback": null,              // 触发兜底时：{"provider":"overture","release":"2026-09-23.1","triggered_by":"not_covered","status":"verified","adopted":true}
   "best_match": {                // NAD 官方记录（或 Overture 记录，结构相同，另带 license）
@@ -161,6 +215,10 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 加 `?stream=true` 时返回 `application/x-ndjson`：每查完一条输出一行 `{"index": i, "result": {...}}`（顺序按完成先后），
 客户端断开后剩下的地址不再查询。
 
+### `GET /countries`
+
+支持的国家（中文名）和各自按顺序使用的数据源。
+
 ### `GET /v1/nad/near?lat=&lon=&radius=100&limit=20&number=`
 
 逆地理：返回坐标附近的 NAD 地址点（按距离排序），半径上限 1500 m。
@@ -178,7 +236,8 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 
 `upstreams` 列出每个上游（`census_geocoder`、`nad`、`nad_coverage`、`tigerweb`、`overture`）最近一次真实调用是否成功、
 错误信息和距今秒数；任一失败时 `status` 为 `degraded`。不带参数时不发任何上游请求；`deep=true` 会立即（不走缓存）
-请求每个上游，并返回 NAD 点数/延迟、Overture 当前 release。
+请求每个上游，并返回 NAD 点数/延迟、Overture 当前 release。其他国家的数据源单独列在 `intl_upstreams`，
+它们出错不会把整个服务标成 `degraded`；`japanpost` 显示日本邮编表是否已加载。
 
 ## 配置（环境变量）
 
@@ -201,6 +260,10 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 | `OVERTURE_MEMORY_LIMIT` | 1GB | DuckDB 内存上限 |
 | `OVERTURE_THREADS` | 16 | DuckDB 线程数。读 S3 时线程主要在等网络，比 CPU 核数多更快（冷启动实测：32 线程 2.3 s，1–2 线程 9–26 s） |
 | `OVERTURE_WARMUP_TIMEOUT_S` | 180 | 启动预热查询的超时（后台进行，不影响用户请求；用户请求仍用 `OVERTURE_TIMEOUT_S`） |
+| `PHOTON_URL` | `https://photon.komoot.io` | OpenStreetMap 搜索（德国、意大利等定位，英国等 OSM 国家核对）。大批量使用请自建 |
+| `PHOTON_CONCURRENCY` / `INTL_CONCURRENCY` | 2 / 4 | 每个海外数据源同时进行的请求数 |
+| `NAD_DATA_DIR` | `data/` | 下载的参考数据（日本邮政邮编表） |
+| `FR_BAN_URL`、`NL_PDOK_URL`、`GSI_URL` 等 | 各官方地址 | 每个数据源的地址都可以覆盖（见 `app/config.py`） |
 
 缓存、限流和 DuckDB 连接都是进程内的：多 worker 时各自独立（每个 worker 各自预热 Overture、各占最多
 `OVERTURE_MEMORY_LIMIT` 内存）；需要共享缓存/限流可换 Redis。
@@ -208,8 +271,8 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 ## 测试
 
 ```bash
-.venv/bin/python -m pytest -q tests                      # 离线：解析/归一化、判定流程、Overture 映射、网页路由、上游客户端（87 个）
-.venv/bin/python scripts/smoke_test.py http://127.0.0.1:8000   # 在线：17 个真实地址端到端（含 Overture 兜底）
+.venv/bin/python -m pytest -q tests                      # 离线：解析/归一化、判定流程、Overture 映射、各国数据源的响应解析、网页路由、上游客户端（111 个）
+.venv/bin/python scripts/smoke_test.py http://127.0.0.1:8000   # 在线：45 个真实地址端到端（美国 17 个，含 Overture 兜底；欧洲和日本 28 个）
 ```
 
 ## 已知局限
@@ -225,3 +288,5 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 - 威斯康星网格门牌（`N95W18000 ...`）等特殊格式暂不解析。
 - 上游是公共免费服务，冷查询偶尔 5–15 s；生产环境建议保留缓存与限流。
 - 若需高并发/离线/SLA，仍建议按州下载 NAD 自建 PostGIS（可沿用本项目的解析与匹配逻辑）。
+- **欧洲和日本**：英国、爱尔兰、瑞典等没有免费官方门牌数据的国家只能靠 OpenStreetMap，找不到门牌时无法判断；
+  日本大部分城区只能核实到番；奥地利和日本用的是没有公开承诺的接口，可能变动。

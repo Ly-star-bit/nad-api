@@ -110,8 +110,8 @@
   </header>
 
   <section class="intro">
-    <h1>核对一个美国地址是否真实存在</h1>
-    <p>以美国交通部 National Address Database（约 9,800 万个地址点）为准，NAD 没有覆盖的县市用 Overture Maps 补查。地址要带门牌号，最好再带上城市和州，或者 ZIP。</p>
+    <h1>核对一个地址是否真实存在</h1>
+    <p>美国地址以美国交通部 National Address Database（约 9,800 万个地址点）为准，NAD 没有覆盖的县市用 Overture Maps 补查。欧洲查各国的官方地址登记，没有免费接口的国家用 Overture Maps 或 OpenStreetMap；日本查国土地理院。地址要带门牌号，最好再带上城市和邮编。</p>
   </section>
 
   <form id="form" autocomplete="off">
@@ -121,6 +121,7 @@
       <button class="go" type="submit">校验</button>
     </div>
     <div class="opts">
+      <label>国家 <select id="cc" aria-label="国家"><option value="">自动识别</option></select></label>
       <label><input id="ov" type="checkbox" checked>NAD 查不到时用 Overture 补查</label>
       <label><input id="zf" type="checkbox">定位失败时按 ZIP 范围搜索（较慢）</label>
     </div>
@@ -135,26 +136,34 @@
       <button type="button" class="pick" data-q="1716 W Washington St, Phoenix, AZ 85007">Phoenix，门牌不存在</button>
       <button type="button" class="pick" data-q="1600 Amphitheatre Pkwy, Mountain View, CA 94043">Mountain View，NAD 未覆盖</button>
       <button type="button" class="pick" data-q="123 Fakestreet Blvd, Phoenix AZ 85007">虚构地址</button>
+      <button type="button" class="pick" data-q="Unter den Linden 977, 10117 Berlin, Germany">柏林，门牌不存在</button>
+      <button type="button" class="pick" data-q="Damrak 8-H, 1012 LG Amsterdam, Netherlands">阿姆斯特丹，带附加号</button>
+      <button type="button" class="pick" data-q="〒154-0017 東京都世田谷区世田谷4-21-27">东京</button>
+      <button type="button" class="pick" data-q="2-8-1 Nishi-Shinjuku, Shinjuku-ku, Tokyo 163-8001, Japan">东京，罗马字</button>
     </div>
   </form>
 
   <main id="out" aria-live="polite"></main>
 
   <footer>
-    数据来自 USDOT National Address Database、US Census Geocoder 和 Overture Maps，展示 Overture 数据时请遵循其<a href="https://docs.overturemaps.org/attribution" target="_blank" rel="noopener">署名要求</a>。校验结果只说明地址点存在，不代表 USPS 可以投递。
+    美国数据来自 USDOT National Address Database、US Census Geocoder 和 Overture Maps；欧洲来自各国官方地址登记（法国 BAN、荷兰 BAG 等）、Overture Maps 和 © OpenStreetMap 贡献者；日本来自国土地理院和日本邮政。展示 Overture 数据时请遵循其<a href="https://docs.overturemaps.org/attribution" target="_blank" rel="noopener">署名要求</a>，每条结果的数据来源和许可见结果下方。校验结果只说明地址点存在，不代表邮政可以投递。
   </footer>
 </div>
 
 <script type="module">
-import { STATUS, SOURCE, store, esc, tone, label, pct, fmtMs, setupKey, describeHttpError, showHealth, copyText, zipMismatch } from './static/common.js';
+import { STATUS, SOURCE, store, esc, tone, label, pct, fmtMs, setupKey, describeHttpError, showHealth, copyText, zipMismatch,
+  zipWord, verdictLabel, verdictText, loadCountries } from './static/common.js';
 import { createMap, fit, colors, resultPoint } from './static/map.js';
 
 const $ = (s) => document.querySelector(s);
-const form = $('#form'), q = $('#q'), ov = $('#ov'), zf = $('#zf'), out = $('#out');
+const form = $('#form'), q = $('#q'), cc = $('#cc'), ov = $('#ov'), zf = $('#zf'), out = $('#out');
 const key = setupKey($('#keyrow'), $('#key'));
 
-const LEVEL = { unit: '单元', address: '门牌', street: '街道' };
+const LEVEL = { unit: '单元', address: '门牌', block: '番（街区）', street: '街道' };
 const TIMING = { geocode: '定位', coverage: '县覆盖', nad: 'NAD', street_probe: '街道探测', overture: 'Overture' };
+const GEO = { census: 'Census', photon: 'OpenStreetMap', gsi: '国土地理院' };  // geocode.source -> who located it
+const geoName = (g) => GEO[g && g.source] || '';
+let countryNames = {};
 
 const fmtDist = (m) => (m == null ? '—' : m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(2)} km`);
 const yn = (v) => (v === true ? '<span class="y">一致</span>' : v === false ? '<span class="n">不一致</span>' : '<span class="na">—</span>');
@@ -185,7 +194,7 @@ function renderHome() {
   let h = '';
   const recent = recentList();
   if (recent.length) {
-    const rows = recent.map((x) => `<tr class="t-${tone(x.s)}" data-q="${esc(x.q)}" tabindex="0">
+    const rows = recent.map((x) => `<tr class="t-${tone(x.s)}" data-q="${esc(x.q)}" data-c="${esc(x.c || '')}" tabindex="0">
         <td class="lg"><span class="sq"></span>${esc(label(x.s))}</td><td>${esc(x.q)}</td><td class="act">校验 →</td></tr>`);
     h += `<section class="legend"><h2>最近查询<button type="button" class="linkbtn" data-clear>清除</button></h2>
       <table>${rows.join('')}</table></section>`;
@@ -203,7 +212,7 @@ function renderLoading(text) {
         <div class="elapsed"><span id="elapsed">0.0</span><small>s</small></div>
       </div>
       <div class="foot">
-        <span>依次查询 Census 定位、NAD 地址点和县覆盖，必要时再查 Overture。某个地区第一次查询可能要 10–20 秒。</span>
+        <span>先给地址定位，再到地址库里核对门牌。某个地区第一次查询可能要 10–20 秒。</span>
         <button type="button" class="linkbtn" data-cancel>取消</button>
       </div>
     </section>`);
@@ -217,24 +226,21 @@ function renderResult(r) {
   const st = STATUS[r.status] || { t: r.status, tone: 'none' };
   const bm = r.best_match;
   const censusDown = r.status === 'upstream_error' && !r.geocode && (r.notes || []).some((n) => n.startsWith('census geocoder unavailable'));
-  const zipFix = zipMismatch(r);
-  const desc = r.status === 'verified'
-    ? (r.match_level === 'unit' ? '门牌、街道和单元号都有记录。' : '门牌和街道都有记录。')
-      + (zipFix ? `但 ZIP 不对：输入的是 ${r.parsed.zip}，记录里是 ${zipFix}。` : '')
-    : censusDown ? '连不上 Census 地理编码服务，没法给地址定位，这不代表地址有问题。一直这样的话，多半是服务器访问 census.gov 的网络不通，原因见下方服务端说明。'
-    : st.d || '';
-  document.title = `${st.t} · ${r.input} — NAD 地址校验`;
+  const desc = censusDown ? '连不上 Census 地理编码服务，没法给地址定位，这不代表地址有问题。一直这样的话，多半是服务器访问 census.gov 的网络不通，原因见下方服务端说明。'
+    : verdictText(r);
+  const word = verdictLabel(r);
+  document.title = `${word} · ${r.input} — NAD 地址校验`;
 
   let h = `<article class="slip t-${st.tone}">
     <header class="verdict">
       <div>
-        <div class="v-word"><span class="sq"></span>${esc(st.t)}<code>${esc(r.status)}</code></div>
+        <div class="v-word"><span class="sq"></span>${esc(word)}<code>${esc(r.status)}</code></div>
         <p class="v-desc">${esc(desc)}</p>
       </div>
       ${r.data_source == null ? '' : `<dl class="v-stats">
         <div><dt>置信度</dt><dd>${pct(r.confidence)}</dd></div>
         <div><dt>匹配到</dt><dd>${LEVEL[r.match_level] || '—'}</dd></div>
-        <div><dt>数据来源</dt><dd>${SOURCE[r.data_source] || '—'}</dd></div>
+        <div><dt>数据来源</dt><dd>${esc(SOURCE[r.data_source] || r.data_source || '—')}</dd></div>
       </dl>`}
     </header>`;
 
@@ -250,13 +256,13 @@ function renderResult(r) {
   h += ambiguity(r);
   if (pt) h += `<section class="map-sec"><div id="map" class="map"></div>${mapKey(r)}</section>`;
 
-  if (r.status === 'geocode_failed') {
+  if (r.status === 'geocode_failed' && (r.country || 'US') === 'US') {
     h += `<section class="sec"><p class="hint">${r.parsed && r.parsed.zip && !zf.checked
       ? `可以在 ZIP ${esc(r.parsed.zip)} 的范围内直接搜索门牌，需要 3–20 秒。<button type="button" class="linkbtn" data-retry-zip>按 ZIP 范围重试</button>`
       : r.parsed && r.parsed.zip ? '已经按 ZIP 范围搜索过。请检查街道名和门牌号是否拼写正确。'
       : '地址里没有 ZIP。补上 ZIP 后，可以在 ZIP 范围内直接搜索门牌。'}</p></section>`;
   }
-  if (bm && bm.match) h += checks(bm.match);
+  if (bm && bm.match) h += checks(bm.match, r);
   h += fields(r);
   if (r.suggestions && r.suggestions.length) h += table('同一条街上最接近的门牌', r.suggestions, false);
   const others = (r.candidates || []).filter((c) => !bm || c.formatted !== bm.formatted);
@@ -281,7 +287,7 @@ const otherCandidates = (r) => (r.candidates || []).filter((c) => hasPoint(c) &&
 function mapKey(r) {
   const items = [];
   if (hasPoint(r.best_match)) items.push(`<span><i class="kd t-${tone(r.status)}"></i>匹配记录</span>`);
-  if (hasPoint(r.geocode)) items.push('<span><i class="kr"></i>Census 定位点</span>');
+  if (hasPoint(r.geocode)) items.push(`<span><i class="kr"></i>${esc(geoName(r.geocode))} 定位点</span>`);
   if ((r.suggestions || []).some(hasPoint)) items.push('<span><i class="kd ks"></i>同一条街上的门牌（点一下可以校验）</span>');
   if (otherCandidates(r).length) items.push('<span><i class="kd kc"></i>其他候选</span>');
   return `<div class="map-key">${items.join('')}</div>`;
@@ -317,14 +323,14 @@ async function drawResultMap(r) {
     // same-street house numbers, labelled so the run of numbers along the street reads at a glance; click to verify
     put(x, { radius: 5.5, color: c.surface, weight: 2, fillColor: c.accent, fillOpacity: 1 },
       `${esc(x.formatted)}<br><span class="na">点一下校验这个门牌</span>`, { label: esc(x.address_number || '') })
-      .on('click', () => { q.value = x.formatted; run(true); });
+      .on('click', () => { q.value = x.formatted; if (r.country && r.country !== 'US') setCountry(r.country); run(true); });
   }
   const g = hasPoint(r.geocode) ? r.geocode : null, bm = hasPoint(r.best_match) ? r.best_match : null;
   if (g && bm) L.polyline([at(g), at(bm)], { color: c.ink2, weight: 1.5, dashArray: '4 4', interactive: false }).addTo(map);
-  if (g) put(g, { radius: 7, color: c.ink, weight: 2, fill: false }, `Census 定位点<br><span class="na">${esc(g.matched_address || '')}</span>`);
+  if (g) put(g, { radius: 7, color: c.ink, weight: 2, fill: false }, `${esc(geoName(g))} 定位点<br><span class="na">${esc(g.matched_address || '')}</span>`);
   if (bm) {
     put(bm, { radius: 8, color: c.surface, weight: 2.5, fillColor: c[tone(r.status)], fillOpacity: 1 },
-      `<b>${esc(label(r.status))}</b><br>${esc(bm.formatted)}`);
+      `<b>${esc(verdictLabel(r))}</b><br>${esc(bm.formatted)}`);
   }
   fit(map, near.length > 1 ? near : pts);  // far-off candidates (same number, other street) stay off-screen
   // house-number labels sit right of their dot; hide any that would cover another marker or label (zoom in to see them)
@@ -364,14 +370,14 @@ function ambiguity(r) {
     </section>`;
 }
 
-function checks(m) {
+function checks(m, r) {
   const cell = (k, v) => `<div><dt>${k}</dt><dd>${v}</dd></div>`;
   const sc = m.street_score >= 0.95 ? 'y' : m.street_score >= 0.8 ? 'w' : 'n';
   return `<dl class="checks">${[
     cell('门牌', yn(m.number_exact)),
     cell('街道相似度', `<span class="${sc}">${pct(m.street_score)}</span>`),
     cell('单元', yn(m.unit_match)),
-    cell('ZIP', yn(m.zip_match)),
+    cell(zipWord(r), yn(m.zip_match)),
     cell('城市', yn(m.city_match)),
     cell('距定位点', fmtDist(m.distance_m)),
   ].join('')}</dl>`;
@@ -382,23 +388,32 @@ function fields(r) {
   const add = (k, v) => { if (v) rows.push(`<div><dt>${k}</dt><dd>${v}</dd></div>`); };
   const bm = r.best_match, p = r.parsed || {}, g = r.geocode, c = r.coverage, f = r.fallback;
 
+  const jp = r.country === 'JP', pv = r.provider;
   if (bm) add('输入', esc(r.input));
-  add('解析结果', [['门牌', p.house_number], ['街道', p.street], ['单元', p.unit], ['城市', p.city], ['州', p.state], ['ZIP', p.zip]]
+  add('解析结果', [['门牌', p.house_number], [jp ? '地名' : '街道', p.street], [jp ? '建筑/房间' : '单元', p.unit], ['城市', p.city],
+    ['州', p.state], [zipWord(r), p.zip]]
     .filter(([, v]) => v).map(([k, v]) => `<span class="na">${k}</span> ${esc(v)}`).join(SEP));
+  if (pv) {
+    add('数据提供方', [esc(countryNames[r.country] || r.country), `<a href="${esc(pv.url)}" target="_blank" rel="noopener">${esc(pv.name)}</a>`,
+      `许可 ${esc(pv.license)}`, pv.attribution && `<span class="na">${esc(pv.attribution)}</span>`].filter(Boolean).join(SEP));
+  }
   if (bm) {
     add('记录来源', [esc(bm.source), bm.license && `许可 ${esc(bm.license)}`, bm.updated && `更新于 ${esc(bm.updated)}`]
       .filter(Boolean).join(SEP));
   }
   if (g) {
     add('地理编码', g.source === 'census' ? `Census${SEP}<span class="mono">${esc(g.matched_address)}</span>`
-      : g.source === 'zcta' ? `Census 未能定位，按 ZIP ${esc(g.zip)} 的范围搜索` : '使用传入的坐标');
+      : g.source === 'zcta' ? `Census 未能定位，按 ZIP ${esc(g.zip)} 的范围搜索`
+      : GEO[g.source] ? `${GEO[g.source]}${SEP}<span class="mono">${esc(g.matched_address || '')}</span>` : '使用传入的坐标');
   }
   if (c) {
     const place = [c.county, c.state_name || c.state].filter(Boolean).map(esc).join(', ');
     add('县覆盖', [place, (c.in_nad ? '已接入 NAD' : '未接入 NAD') + `<span class="na">（${esc(c.status)}）</span>`,
       c.data_date && `数据日期 ${esc(c.data_date)}`, c.partial && '县内部分地区状态不同'].filter(Boolean).join(SEP));
   }
-  if (f) {
+  if (f && pv) {
+    add('备用数据源', `首选数据源不可用或在这里没有数据（${esc(f.error || '')}），改用 ${esc((pv && pv.name) || f.provider)}`);
+  } else if (f) {
     const rel = f.release ? `Overture ${esc(f.release)}` : 'Overture';
     add('Overture 补查', f.error ? `${rel} 补查失败：${esc(f.error)}`
       : f.adopted ? `NAD 的结果是「${esc(label(f.triggered_by))}」，采用了 ${rel} 的结果「${esc(label(f.status))}」`
@@ -433,9 +448,9 @@ function recentList() {
   return Array.isArray(v) ? v.filter((x) => x && typeof x.q === 'string') : [];
 }
 
-function remember(text, status) {
+function remember(text, status, country) {
   const list = recentList().filter((x) => x.q.toLowerCase() !== text.toLowerCase());
-  list.unshift({ q: text, s: status });
+  list.unshift({ q: text, s: status, c: country });
   store.set('nad.recent', list.slice(0, 6));
 }
 
@@ -452,6 +467,7 @@ function stop() {
 
 function syncUrl(text, push) {
   const p = new URLSearchParams({ q: text });
+  if (cc.value) p.set('country', cc.value);
   if (zf.checked) p.set('zip_fallback', '1');
   if (!ov.checked) p.set('overture', '0');
   const url = `${location.pathname}?${p}`;
@@ -473,6 +489,7 @@ async function run(push) {
   }, 100);
 
   const params = new URLSearchParams({ address: text });
+  if (cc.value) params.set('country', cc.value);
   if (!ov.checked) params.set('overture_fallback', 'false');
   if (zf.checked) params.set('zip_fallback', 'true');
   const hadKey = key.has();
@@ -483,7 +500,7 @@ async function run(push) {
     if (res.ok && body) {
       lastJson = JSON.stringify(body, null, 2);
       renderResult(body);
-      remember(text, body.status);
+      remember(text, body.status, cc.value);
     } else {
       const e = describeHttpError(res.status, body, hadKey);
       if (e.needKey) key.reveal();
@@ -497,9 +514,18 @@ async function run(push) {
   }
 }
 
+// The picker's options arrive from /countries after the first query may already have started: a country from the
+// URL or a recent query gets a placeholder option until then, so it is never silently dropped.
+function setCountry(code) {
+  if (code && ![...cc.options].some((o) => o.value === code)) cc.add(new Option(code, code));
+  cc.value = code || '';
+}
+
 function fromUrl() {
   const p = new URLSearchParams(location.search);
   q.value = p.get('q') || '';
+  wantCountry = p.get('country') || '';
+  setCountry(wantCountry);
   zf.checked = p.get('zip_fallback') === '1';
   ov.checked = p.get('overture') !== '0';
   if (q.value) run(null);
@@ -516,6 +542,11 @@ document.addEventListener('click', (e) => {
   if (!t) return;
   if (t.dataset.q != null) {
     q.value = t.dataset.q;
+    // a recent query keeps its country, an example names its own, and a suggested address keeps the country it
+    // was found in (its text may not name the country)
+    if (t.dataset.c != null) setCountry(t.dataset.c);
+    else if (t.closest('.picks')) setCountry('');
+    else if (t.closest('#out .slip') && lastResult && lastResult.country && lastResult.country !== 'US') setCountry(lastResult.country);
     run(true);
     if (out.getBoundingClientRect().top < 0) form.scrollIntoView({ block: 'start' });
   } else if (t.hasAttribute('data-clear')) {
@@ -530,7 +561,8 @@ document.addEventListener('click', (e) => {
   } else if (t.hasAttribute('data-copy')) {
     copied(t, lastJson);
   } else if (t.hasAttribute('data-copy-addr')) {
-    copied(t, (lastResult.best_match.formatted || '').toUpperCase());
+    const f = lastResult.best_match.formatted || '';
+    copied(t, (lastResult.country || 'US') === 'US' ? f.toUpperCase() : f);
   }
 });
 function copied(btn, text) {
@@ -547,7 +579,13 @@ document.addEventListener('keydown', (e) => {
 
 // ------------------------------------------------------------------ init
 
+let wantCountry = '';
 fromUrl();
+loadCountries(cc, wantCountry).then((list) => {
+  countryNames = Object.fromEntries(list.map((c) => [c.code, c.name]));
+  if (lastResult) renderResult(lastResult);
+});
+cc.addEventListener('change', () => { wantCountry = cc.value; });
 if (!q.value && matchMedia('(pointer: fine)').matches) q.focus();
 showHealth($('#health'));
 // marker colours are read from the CSS tokens, so redraw when the colour scheme flips

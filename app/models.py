@@ -19,7 +19,8 @@ Status = Literal[
 
 
 class VerifyRequest(BaseModel):
-    """Either `address` (one line) or `street` (+ optional city/state/zip) is required."""
+    """Either `address` (one line) or `street` (+ optional city/state/zip) is required. Outside the US, `zip` is
+    the postcode and `state` is ignored."""
 
     # Length limits: real addresses are well under 200 characters, and fuzzy street matching costs grow with the
     # square of the length (a 100 KB street name against 2000 nearby points would hold the server for a minute).
@@ -29,6 +30,10 @@ class VerifyRequest(BaseModel):
     city: str | None = Field(None, max_length=100, examples=["Phoenix"])
     state: str | None = Field(None, max_length=50, examples=["AZ"])
     zip: str | None = Field(None, max_length=20, examples=["85007"])
+    country: str | None = Field(
+        None, max_length=60, examples=["US", "DE", "Japan"],
+        description="ISO code or name (English, native or Chinese). Default: named at the end of the address line "
+                    "('..., 10117 Berlin, Germany'), a Japanese address written in Japanese, else US.")
     lat: float | None = Field(None, ge=-90, le=90, description="Skip geocoding and search around this point")
     lon: float | None = Field(None, ge=-180, le=180)
     zip_fallback: bool = Field(
@@ -56,7 +61,7 @@ class BatchRequest(BaseModel):
 class MatchInfo(BaseModel):
     score: float
     street_score: float
-    number_exact: bool
+    number_exact: bool | None = Field(description="null when the source cannot tell (Japan: data only to the 番)")
     zip_match: bool | None
     city_match: bool | None
     unit_match: bool | None
@@ -102,7 +107,8 @@ class Coverage(BaseModel):
 
 
 class FallbackInfo(BaseModel):
-    provider: Literal["overture"]
+    provider: str = Field(description="'overture' for US addresses; outside the US the provider that answered "
+                                      "after the country's first choice failed")
     release: str | None = Field(description="Overture release that was queried, e.g. 2026-09-23.1")
     triggered_by: str = Field(description="NAD status that triggered the fallback")
     status: Status | None = Field(description="verdict from Overture data alone")
@@ -110,14 +116,30 @@ class FallbackInfo(BaseModel):
     error: str | None = None
 
 
+class ProviderInfo(BaseModel):
+    key: str
+    name: str
+    authority: Literal["official", "overture", "osm"] = Field(
+        description="official register; Overture Maps (official open data republished); OpenStreetMap (community "
+                    "data: a match is evidence, a miss is not)")
+    url: str
+    license: str
+    attribution: str
+
+
 class VerifyResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     status: Status
     verified: bool
-    match_level: Literal["unit", "address", "street"] | None
+    match_level: Literal["unit", "address", "block", "street"] | None = Field(
+        description="'block': Japan, the 番 (block) exists but the data has no 号 (building number) to check")
     confidence: float
-    data_source: Literal["nad", "overture"] | None = Field(description="dataset the final verdict comes from")
+    data_source: str | None = Field(description="dataset the final verdict comes from: 'nad' / 'overture' in the US, "
+                                                "else the provider key (fr_ban, nl_pdok, jp_gsi, overture, osm)")
+    country: str = Field("US", description="ISO 3166 code of the country the address was checked in")
+    provider: ProviderInfo | None = Field(None, description="outside the US: who answered, its licence and the "
+                                                            "attribution to show with the data")
     nad_status: Status | None = Field(description="verdict from NAD alone (before any fallback)")
     input: str
     parsed: dict

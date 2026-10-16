@@ -63,6 +63,41 @@ OVERTURE_THREADS = _env_int("OVERTURE_THREADS", 16)
 # The start-up warm-up runs in the background, so it can wait much longer than a user's query.
 OVERTURE_WARMUP_TIMEOUT_S = _env_float("OVERTURE_WARMUP_TIMEOUT_S", 180.0)
 
+# --- Outside the US (Europe, Japan): see app/intl/ ---------------------------------
+
+# Official registers with a free public API (no key).
+FR_BAN_URL = os.getenv("FR_BAN_URL", "https://data.geopf.fr/geocodage/search")
+NL_PDOK_URL = os.getenv("NL_PDOK_URL", "https://api.pdok.nl/bzk/locatieserver/search/v3_1/free")
+BE_VL_GEO_URL = os.getenv("BE_VL_GEO_URL", "https://geo.api.vlaanderen.be/geolocation/v4/Location")
+BE_VL_REGISTER_URL = os.getenv("BE_VL_REGISTER_URL", "https://api.basisregisters.vlaanderen.be/v2/adressen")
+BE_WA_URL = os.getenv("BE_WA_URL", "https://geoservices.wallonie.be/geocodeWS/geocode")
+LU_URL = os.getenv("LU_URL", "https://apiv4.geoportail.lu/geocode/search")
+CH_URL = os.getenv("CH_URL", "https://api3.geo.admin.ch/rest/services/api/SearchServer")
+AT_URL = os.getenv("AT_URL", "https://kataster.bev.gv.at/api/all/")
+ES_URL = os.getenv("ES_URL", "https://www.cartociudad.es/geocoder/api/geocoder/candidates")
+NO_URL = os.getenv("NO_URL", "https://ws.geonorge.no/adresser/v1/sok")
+FI_URL = os.getenv("FI_URL", "https://paikkatiedot.ymparisto.fi/geoserver/ryhti_building/ogc/features/v1/collections/"
+                             "open_address/items")
+IS_URL = os.getenv("IS_URL", "https://gis.fasteignaskra.is/geoserver/wfs")
+EE_URL = os.getenv("EE_URL", "https://inaadress.maaamet.ee/inaadress/gazetteer")
+LV_URL = os.getenv("LV_URL", "https://data.gov.lv/dati/api/3/action/datastore_search")
+LV_RESOURCE = os.getenv("LV_RESOURCE", "a510737a-18ce-400f-ad4b-04fce5228272")  # buildings and land parcels
+PL_URL = os.getenv("PL_URL", "https://services.gugik.gov.pl/uug/")
+CZ_URL = os.getenv("CZ_URL", "https://ags.cuzk.gov.cz/arcgis/rest/services/RUIAN/Vyhledavaci_sluzba_nad_daty_RUIAN/"
+                             "MapServer/exts/GeocodeSOE/findAddressCandidates")
+SI_URL = os.getenv("SI_URL", "https://ipi.eprostor.gov.si/wfs-si-gurs-kn/ogc/features/collections/SI.GURS.KN:NASLOVI_HS/items")
+GSI_URL = os.getenv("GSI_URL", "https://msearch.gsi.go.jp/address-search/AddressSearch")
+POSTCODES_IO_URL = os.getenv("POSTCODES_IO_URL", "https://api.postcodes.io")
+JAPANPOST_URL = os.getenv("JAPANPOST_URL", "https://www.post.japanpost.jp/service/search/zipcode/download")
+# Photon (OpenStreetMap search by komoot). The public instance asks only for fair use; point this at a self-hosted
+# Photon for heavy batch work. Public Nominatim is not an option: its policy forbids verification services.
+PHOTON_URL = os.getenv("PHOTON_URL", "https://photon.komoot.io").rstrip("/")
+# Concurrent requests per foreign service (a 100-row batch for one country never sends more than this at once).
+INTL_CONCURRENCY = _env_int("INTL_CONCURRENCY", 4)
+INTL_SERVICE_CONCURRENCY = {"photon": _env_int("PHOTON_CONCURRENCY", 2)}
+# Downloaded reference data (Japan Post postcode tables, refreshed monthly).
+DATA_DIR = os.getenv("NAD_DATA_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"))
+
 # --- Behaviour ---------------------------------------------------------------------
 
 HTTP_TIMEOUT = _env_float("NAD_HTTP_TIMEOUT", 25.0)

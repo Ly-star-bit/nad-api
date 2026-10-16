@@ -69,6 +69,7 @@ def overture_record(row: dict) -> dict:
         "state": state,
         "zip": zip5,
         "zip4": zip4,
+        "postcode": postcode,  # as published: outside the US the ZIP split above means nothing
         "lat": row.get("lat"),  # bbox values are float32 in Overture: ~1 m precision
         "lon": row.get("lon"),
         "placement": None,

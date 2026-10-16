@@ -16,6 +16,8 @@ from fastapi.staticfiles import StaticFiles
 
 from . import config
 from .address import fix_zip, norm_unit, parse_oneline, parse_structured, prep, state_abbr
+from .intl import COUNTRIES, Ctx, JapanPost, country_in_text, resolve_country, verify_intl
+from .intl import INFO as INTL_INFO
 from .models import (
     BatchItem, BatchRequest, BatchResponse, CoverageResponse, NearResponse, OvertureNearResponse, VerifyRequest,
     VerifyResponse,
@@ -29,13 +31,16 @@ from .verify import bbox_around, haversine_m, verify_address
 async def lifespan(app: FastAPI):
     app.state.upstream = Upstream()
     app.state.overture = None
-    warmup = None
+    tasks = []
     if config.OVERTURE_ENABLED:
         app.state.overture = OvertureClient(app.state.upstream.client)
-        warmup = asyncio.create_task(app.state.overture.warmup())  # background; never blocks startup
+        tasks.append(asyncio.create_task(app.state.overture.warmup()))  # background; never blocks startup
+    app.state.japanpost = JapanPost(app.state.upstream.client, Path(config.DATA_DIR))
+    tasks.append(asyncio.create_task(app.state.japanpost.ensure()))  # romaji Japanese addresses need it
     yield
-    if warmup and not warmup.done():
-        warmup.cancel()
+    for t in tasks:
+        if not t.done():
+            t.cancel()
     await app.state.upstream.aclose()
 
 
@@ -48,7 +53,11 @@ app = FastAPI(
         "Pipeline: Census geocode → NAD spatial query (radius + house number) → local street/unit/ZIP "
         "matching → county coverage check → **Overture Maps fallback** (NAD + OpenAddresses county/city "
         "data on public S3, read with DuckDB) when NAD cannot confirm the address.\n\n"
-        "NAD confirms that an address physically exists; it does **not** confirm USPS deliverability."
+        "NAD confirms that an address physically exists; it does **not** confirm USPS deliverability.\n\n"
+        "**Europe and Japan** (`country`, or a country name at the end of the address): each country's official "
+        "address register where it has a free API (France BAN, Netherlands BAG, ...), the official registers that "
+        "Overture Maps republishes (Germany, Italy, ...), OpenStreetMap elsewhere, and 国土地理院 for Japan. "
+        "See `/countries`."
     ),
     lifespan=lifespan,
 )
@@ -90,7 +99,23 @@ async def upstream_error_handler(_: Request, exc: UpstreamError):
     return JSONResponse({"detail": f"upstream service error ({exc.service}): {exc.message}"}, status_code=502)
 
 
+def _country(req: VerifyRequest) -> str:
+    if req.country:
+        code = resolve_country(req.country)
+        if code is None:
+            raise HTTPException(422, f"unsupported country '{req.country}'; supported: US, "
+                                     + ", ".join(sorted(COUNTRIES)))
+        return code
+    return country_in_text(req.address or req.street) or "US"
+
+
 async def _run_verify(req: VerifyRequest) -> dict:
+    country = _country(req)
+    if country != "US":
+        return await verify_intl(
+            Ctx(app.state.upstream, app.state.overture), getattr(app.state, "japanpost", None), country,
+            address=req.address, street=req.street, city=req.city, postcode=req.zip, unit=req.unit,
+            overture_fallback=req.overture_fallback, max_candidates=req.max_candidates)
     if req.address and not req.street:
         pa = parse_oneline(req.address)
         if req.unit:
@@ -143,13 +168,16 @@ async def root(request: Request):
     return {
         "service": app.title,
         "docs": "/docs",
-        "endpoints": ["/v1/verify", "/v1/verify/batch", "/v1/nad/near", "/v1/nad/coverage", "/health"],
+        "endpoints": ["/v1/verify", "/v1/verify/batch", "/v1/nad/near", "/v1/nad/coverage", "/countries", "/health"],
     }
 
 
 @app.get("/batch", include_in_schema=False)
 async def batch_page():
     return _page("batch.html")
+
+
+US_SERVICES = {"census_geocoder", "nad", "nad_coverage", "tigerweb", "overture"}
 
 
 @app.get("/health", tags=["meta"])
@@ -180,10 +208,30 @@ async def health(deep: bool = Query(False, description="Call every upstream now 
         await asyncio.gather(count(), up.ping(), *([release()] if ov else []))
     now = time.time()
     seen = {**up.status, **({"overture": ov.status} if ov and ov.status else {})}
-    body["upstreams"] = {s: {"ok": v["ok"], "error": v["error"], "ago_s": round(now - v["at"])} for s, v in seen.items()}
-    if not all(v["ok"] for v in seen.values()) or "error" in body["overture"]:
+    view = lambda v: {"ok": v["ok"], "error": v["error"], "ago_s": round(now - v["at"])}  # noqa: E731
+    body["upstreams"] = {s: view(v) for s, v in seen.items() if s in US_SERVICES}
+    # Services for other countries are reported apart and don't turn the whole service "degraded": a timeout in
+    # one country's register says nothing about the others.
+    body["intl_upstreams"] = {s: view(v) for s, v in seen.items() if s not in US_SERVICES}
+    jp: JapanPost | None = getattr(app.state, "japanpost", None)
+    body["japanpost"] = {"loaded": bool(jp and jp.ready), "error": jp.error if jp else None}
+    if not all(v["ok"] for v in body["upstreams"].values()) or "error" in body["overture"]:
         body["status"] = "degraded"
     return body
+
+
+@app.get("/countries", tags=["meta"], summary="Countries that can be verified and their data sources")
+async def countries():
+    """`providers` in the order they are asked: the first that answers decides; the next only when it fails (or,
+    for Overture, has no data around the address)."""
+    def prov(key: str) -> dict:
+        p = INTL_INFO[key]
+        return {"key": key, "name": p.name, "authority": p.authority, "license": p.license}
+    us = {"code": "US", "name": "美国", "providers": [
+        {"key": "nad", "name": "USDOT National Address Database", "authority": "official", "license": "Public domain"},
+        {"key": "overture", "name": "Overture Maps", "authority": "overture", "license": "per source"}]}
+    return [us] + [{"code": c.code, "name": c.zh, "providers": [prov(k) for k in c.providers]}
+                   for c in sorted(COUNTRIES.values(), key=lambda c: (c.code != "JP", c.code))]
 
 
 @app.get("/v1/verify", response_model=VerifyResponse, tags=["verify"], summary="Verify one address (query string)")
@@ -193,7 +241,9 @@ async def verify_get(
     unit: str | None = Query(None, max_length=50),
     city: str | None = Query(None, max_length=100),
     state: str | None = Query(None, max_length=50, description="Abbreviation or full name"),
-    zip: str | None = Query(None, max_length=20, alias="zip"),
+    zip: str | None = Query(None, max_length=20, alias="zip", description="ZIP, or the postcode outside the US"),
+    country: str | None = Query(None, max_length=60, description="ISO code or name; default: named at the end of the "
+                                                                 "address, Japanese text -> JP, else US"),
     lat: float | None = Query(None, ge=-90, le=90),
     lon: float | None = Query(None, ge=-180, le=180),
     zip_fallback: bool = Query(False),
@@ -202,7 +252,7 @@ async def verify_get(
 ):
     try:
         req = VerifyRequest(address=address, street=street, unit=unit, city=city, state=state, zip=zip,
-                            lat=lat, lon=lon, zip_fallback=zip_fallback, overture_fallback=overture_fallback,
+                            country=country, lat=lat, lon=lon, zip_fallback=zip_fallback, overture_fallback=overture_fallback,
                             max_candidates=max_candidates)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
