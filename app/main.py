@@ -188,12 +188,12 @@ async def health(deep: bool = Query(False, description="Call every upstream now 
 
 @app.get("/v1/verify", response_model=VerifyResponse, tags=["verify"], summary="Verify one address (query string)")
 async def verify_get(
-    address: str | None = Query(None, description="One-line address", examples=["1700 W Washington St, Phoenix, AZ 85007"]),
-    street: str | None = Query(None, description="Street line (structured mode)"),
-    unit: str | None = Query(None),
-    city: str | None = Query(None),
-    state: str | None = Query(None, description="Abbreviation or full name"),
-    zip: str | None = Query(None, alias="zip"),
+    address: str | None = Query(None, max_length=300, description="One-line address", examples=["1700 W Washington St, Phoenix, AZ 85007"]),
+    street: str | None = Query(None, max_length=200, description="Street line (structured mode)"),
+    unit: str | None = Query(None, max_length=50),
+    city: str | None = Query(None, max_length=100),
+    state: str | None = Query(None, max_length=50, description="Abbreviation or full name"),
+    zip: str | None = Query(None, max_length=20, alias="zip"),
     lat: float | None = Query(None, ge=-90, le=90),
     lon: float | None = Query(None, ge=-180, le=180),
     zip_fallback: bool = Query(False),
@@ -299,8 +299,9 @@ async def overture_near(
     recs = await ov.query(bbox_around(lat, lon, radius), number=number)
     if number is not None:
         recs = [r for r in recs if r["address_number_int"] == number]
-    for r in recs:
-        r["distance_m"] = round(haversine_m(lat, lon, r["lat"], r["lon"]), 1) if r.get("lat") is not None else None
+    # copies: the records are the cached ones other requests get too, so they must not carry this request's distance
+    recs = [{**r, "distance_m": round(haversine_m(lat, lon, r["lat"], r["lon"]), 1) if r.get("lat") is not None else None}
+            for r in recs]
     recs = sorted((r for r in recs if r["distance_m"] is None or r["distance_m"] <= radius),
                   key=lambda r: r["distance_m"] if r["distance_m"] is not None else 1e9)
     return {"lat": lat, "lon": lon, "radius_m": radius, "count": len(recs[:limit]), "truncated": len(recs) > limit,

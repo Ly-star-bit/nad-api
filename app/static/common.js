@@ -19,6 +19,13 @@ export const STATUS = {
 };
 export const SOURCE = { nad: 'NAD', overture: 'Overture' };
 
+// The record's ZIP when it differs from the ZIP the user typed (a wrong ZIP misroutes a parcel even though the
+// address exists); null otherwise, including when no ZIP was given.
+export function zipMismatch(r) {
+  const bm = r && r.best_match, typed = r && r.parsed && r.parsed.zip;
+  return bm && typed && bm.match && bm.match.zip_match === false && bm.zip ? bm.zip : null;
+}
+
 export const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode etc. */ } },

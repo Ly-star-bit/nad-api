@@ -198,6 +198,11 @@ _UNIT_RE = re.compile(
     r"([A-Z0-9][A-Z0-9\-/]*)",
     re.I,
 )
+# "2nd Floor" / "3rd Fl": a floor written as an ordinal, which _UNIT_RE (designator first) doesn't see
+_FLOOR_RE = re.compile(r"\b(\d+)(?:ST|ND|RD|TH)\s+(?:FLOOR|FLR|FL)\b\.?", re.I)
+# "..., AZ 85007, USA" / "... AZ 85007 US": the country after a state or ZIP
+_COUNTRY_RE = re.compile(
+    r"(\b\d{5}(?:-?\d{4})?|\b[A-Z]{2})[\s,]+(?:U\.?\s?S\.?(?:\s?A\.?)?|UNITED\s+STATES(?:\s+OF\s+AMERICA)?)\s*$", re.I)
 _PO_BOX_RE = re.compile(r"^\s*(?:P\s*O|POST\s+OFFICE)?\s*BOX\s+\d", re.I)
 
 STATE_NAMES = {
@@ -231,7 +236,7 @@ _ZERO_ZIP3 = {
 # Letter suffixes must be attached ("12A"); "1700 W Washington" is a directional, not a suffix.
 _HOUSE_NUMBER_RE = re.compile(
     r"^\s*(?P<pre>[A-Z]{1,2}(?=\d))?(?P<num>\d+)(?:-(?P<num2>\d+))?"
-    r"(?:(?P<suf>[A-Z])|\s+(?P<half>1/2))?(?=\s|,|$)",
+    r"(?:-?(?P<suf>[A-Z])|\s+(?P<half>1/2))?(?=\s|,|$)",
     re.I,
 )
 _STATES = {
@@ -244,9 +249,11 @@ _STATES = {
 
 def prep(text: str | None) -> str:
     """Input as typed -> plain ASCII-ish text: full-width commas, digits and spaces from a Chinese IME become
-    ',', '0-9' and ' ' (NFKC), and whitespace is collapsed."""
+    ',', '0-9' and ' ' (NFKC), a line break inside a cell ("street\ncity, ST") becomes a comma, and whitespace
+    is collapsed."""
     text = (text or "").replace("½", " 1/2").replace("、", ",")  # NFKC alone would turn "100½" into "1001⁄2"
-    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text).replace("⁄", "/")).strip()
+    text = re.sub(r"\s*[\r\n]+\s*", ", ", unicodedata.normalize("NFKC", text).replace("⁄", "/").strip())
+    return re.sub(r"\s+", " ", text).strip(" ,")
 
 
 def state_abbr(text: str | None) -> str:
@@ -399,20 +406,24 @@ def parse_house_number(street_line: str) -> tuple[HouseNumber | None, str]:
     return house, street_line[m.end():].strip(" ,")
 
 
-def _unit_matches(street_line: str) -> list[re.Match]:
-    """Designator + identifier runs that really are units. Several words double as street names, so a run is
+def _unit_matches(street_line: str) -> list[tuple[int, int, str, str]]:
+    """(start, end, identifier, as written) of the runs that really are units: designator + identifier
+    ("Apt 4B"), or an ordinal floor ("2nd Floor"). Several designators double as street names, so a run is
     skipped when its 'identifier' is a street type ("100 Pier Ave", "2100 Space Park Dr") or when no street
     word comes before it ("Pier 39")."""
     house = _HOUSE_NUMBER_RE.match(street_line)
     start = house.end() if house else 0
+    runs = [(m.start(), m.end(), m.group(2)) for m in _UNIT_RE.finditer(street_line)]
+    runs += [(m.start(), m.end(), m.group(1)) for m in _FLOOR_RE.finditer(street_line)]
     out = []
-    for m in _UNIT_RE.finditer(street_line):
-        ident = m.group(2).upper()
-        if ident in SUFFIXES and not any(ch.isdigit() for ch in ident):
+    for s, e, ident in sorted(runs):
+        if ident.upper() in SUFFIXES and not any(ch.isdigit() for ch in ident):
             continue
-        if m.start() < start or not re.search(r"[A-Z]", street_line[start:m.start()], re.I):
+        if s < start or not re.search(r"[A-Z]", street_line[start:s], re.I):
             continue
-        out.append(m)
+        if out and s < out[-1][1]:  # overlaps the previous run
+            continue
+        out.append((s, e, ident, street_line[s:e].strip()))
     return out
 
 
@@ -422,12 +433,12 @@ def extract_unit(street_line: str) -> tuple[str, str, str]:
     matches = _unit_matches(street_line)
     if matches:
         rest, pos = [], 0
-        for m in matches:
-            rest.append(street_line[pos:m.start()])
-            pos = m.end()
+        for s, e, _, _ in matches:
+            rest.append(street_line[pos:s])
+            pos = e
         rest.append(street_line[pos:])
-        unit_raw = " ".join(m.group(0).strip() for m in matches)
-        return re.sub(r"\s+", " ", " ".join(rest)).strip(" ,"), norm_unit(matches[-1].group(2)), unit_raw
+        unit_raw = " ".join(raw for *_, raw in matches)
+        return re.sub(r"\s+", " ", " ".join(rest)).strip(" ,"), norm_unit(matches[-1][2]), unit_raw
     toks = street_line.split()
     if toks and toks[-1].upper() in _UNIT_STANDALONE:
         return " ".join(toks[:-1]), toks[-1].upper(), toks[-1]
@@ -463,7 +474,7 @@ def parse_oneline(text: str) -> ParsedAddress:
     pa = ParsedAddress(raw=raw)
     if not raw:
         return pa
-    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    parts = [p.strip() for p in _COUNTRY_RE.sub(r"\1", raw).split(",") if p.strip()]
     street_line, tail = parts[0], parts[1:]
 
     if not tail:
@@ -485,12 +496,13 @@ def parse_oneline(text: str) -> ParsedAddress:
             if mz:
                 pa.zip5, pa.zip4 = mz.group(1), mz.group(2) or ""
                 tail[-1] = last[: mz.start()].strip()
-            if state_abbr(tail[-1]):
-                pa.state = state_abbr(tail[-1])
-                tail[-1] = ""
+            tail = [t for t in tail if t]  # Census writes "CITY, ST, ZIP": the ZIP had a segment of its own
+            # the last segment is the state when it can't be the city: there is another segment, or it's "AZ"
+            if tail and state_abbr(tail[-1]) and (len(tail) > 1 or len(clean(tail[-1])) == 2):
+                pa.state = state_abbr(tail.pop())
         tail = [t for t in tail if t]
-        # A unit written as its own segment: "123 Main St, Apt 4, Springfield, IL"
-        if tail and _UNIT_RE.match(tail[0]):
+        # A unit written as its own segment: "123 Main St, Apt 4, Springfield, IL" / "..., 2nd Floor, ..."
+        if tail and (_UNIT_RE.match(tail[0]) or _FLOOR_RE.match(tail[0])):
             street_line = f"{street_line} {tail.pop(0)}"
         if tail:
             pa.city = tail[0]

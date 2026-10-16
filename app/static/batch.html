@@ -164,7 +164,7 @@
 </div>
 
 <script type="module">
-import { STATUS, SOURCE, esc, label, pct, setupKey, describeHttpError, showHealth } from './static/common.js';
+import { STATUS, SOURCE, esc, label, pct, setupKey, describeHttpError, showHealth, zipMismatch } from './static/common.js';
 import { createMap, fit, colors, resultPoint } from './static/map.js';
 
 const MAX_ROWS = 500;
@@ -211,7 +211,9 @@ const HEAD_PREFIX = /^(shipto|shipping|ship|recipient|receiver|consignee|deliver
 const normHead = (s) => s.toLowerCase().replace(/[\s_.\-:#/()（）]/g, '');
 
 function parsePaste(s) {
-  // comma is never a delimiter here: one-line addresses are full of them. Tabs come from Excel.
+  // Comma is never a delimiter here: one-line addresses are full of them. Tabs come from Excel, which also
+  // wraps a cell that has line breaks in quotes; read those as one cell when the quotes are balanced.
+  if (/(^|\t|\n)"/.test(s) && (s.match(/"/g) || []).length % 2 === 0) return parseCsv(s, '\t');
   return s.split(/\r?\n/).map((l) => (l.includes('\t') ? l.split('\t') : [l]));
 }
 
@@ -617,7 +619,9 @@ function rowHtml(r) {
     const x = r.result;
     if (x) {
       const bm = x.best_match, near = (x.suggestions || [])[0], g = x.geocode || {};
+      const zipFix = zipMismatch(x);
       m = [bm ? esc(bm.formatted) : near ? `<span class="na">最近门牌</span> ${esc(near.formatted)}` : '',
+        zipFix ? `<span class="w">ZIP 不对，记录里是 ${esc(zipFix)}</span>` : '',
         g.match_count > 1 ? `<span class="w">Census 找到 ${g.match_count} 个同名地址，只核对了第一个</span>` : '']
         .filter(Boolean).join('<br>') || '<span class="na">—</span>';
       from = SOURCE[x.data_source] || '—';
@@ -646,7 +650,7 @@ function guideHtml() {
     ${row('每行一个地址', '一行写完整地址，例如 <code>1700 W Washington St, Phoenix, AZ 85007</code>')}
     ${row('从 Excel 复制', '直接粘贴多列。第一行是表头时按列名识别，没有表头就把各列按顺序拼成一行地址')}
     ${row('上传 CSV', '表头用 <code>address</code>，或者 <code>street</code> / <code>unit</code> / <code>city</code> / <code>state</code> / <code>zip</code>，也认“地址、街道、城市、州、邮编”，以及订单导出里带前缀的列名，如 Shipping Address 1、Ship City、收件人地址。UTF-8 和 GBK 编码都可以')}
-    ${row('导出', '原表的列原样保留，后面追加 <code>verify_status</code>、<code>verify_verdict</code>、<code>verify_matched_address</code>、<code>verify_nearest_number</code>（门牌不存在时同街最近的门牌）等结果列')}
+    ${row('导出', '原表的列原样保留，后面追加 <code>verify_status</code>、<code>verify_verdict</code>、<code>verify_matched_address</code>、<code>verify_nearest_number</code>（门牌不存在时同街最近的门牌）、<code>verify_zip_should_be</code>（ZIP 填错时记录里的 ZIP）等结果列')}
   </table></section>`;
 }
 
@@ -663,23 +667,31 @@ setInterval(() => {
 // ------------------------------------------------------------------ export
 
 const RESULT_COLS = ['verify_status', 'verify_verdict', 'verify_confidence', 'verify_data_source', 'verify_matched_address',
-  'verify_lat', 'verify_lon', 'verify_record_source', 'verify_nearest_number', 'verify_census_matches', 'verify_notes'];
+  'verify_lat', 'verify_lon', 'verify_record_source', 'verify_nearest_number', 'verify_census_matches', 'verify_zip_should_be',
+  'verify_notes'];
+
+// { excelText } is a value Excel must keep as text: a bare 02108 would open as the number 2108
+const excelText = (s) => (/^0\d/.test(s) ? { excelText: s } : s);
 
 function csvCell(v) {
-  let s = v == null ? '' : String(v);
-  // a text cell starting with = + @ (or - not followed by a number) would run as a formula in Excel
-  if (typeof v === 'string' && (/^[=+@\t\r]/.test(s) || /^-(?![\d.])/.test(s))) s = `'${s}`;
+  let s;
+  if (v && v.excelText) s = `="${v.excelText}"`;  // our own formula, so not run through the guard below
+  else {
+    s = v == null || typeof v === 'object' ? '' : String(v);
+    // a text cell starting with = + @ (or - not followed by a number) would run as a formula in Excel
+    if (typeof v === 'string' && (/^[=+@\t\r]/.test(s) || /^-(?![\d.])/.test(s))) s = `'${s}`;
+  }
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 function resultCells(r) {
   if (r.state !== 'done') return RESULT_COLS.map(() => '');
   const x = r.result;
-  if (!x) return ['error', '出错', '', '', '', '', '', '', '', '', r.error || ''];
+  if (!x) return ['error', '出错', '', '', '', '', '', '', '', '', '', r.error || ''];
   const bm = x.best_match || {}, near = !x.best_match && (x.suggestions || [])[0], g = x.geocode || {};
   return [x.status, label(x.status), x.data_source ? x.confidence : '', x.data_source || '', bm.formatted || '',
     bm.lat ?? '', bm.lon ?? '', bm.source || '', near ? near.formatted : '', g.match_count > 1 ? g.match_count : '',
-    (x.notes || []).join('; ')];
+    excelText(zipMismatch(x) || ''), (x.notes || []).join('; ')];
 }
 
 function exportCsv() {

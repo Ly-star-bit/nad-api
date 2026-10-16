@@ -103,3 +103,13 @@ def test_warmup_uses_its_own_timeout_and_retries():
 
     asyncio.run(Client(http=None).warmup(retry_after_s=(0, 0)))
     assert calls == [config.OVERTURE_WARMUP_TIMEOUT_S] * 2  # failed once, succeeded on the retry, then stopped
+
+
+def test_unit_written_with_its_building():
+    from app.upstream import nad_record
+
+    rec = nad_record({"Add_Number": 10, "St_Name": "Elm", "St_PosTyp": "Street", "StNam_Full": "Elm Street",
+                      "Building": "B", "Unit": "201", "Latitude": 1.0, "Longitude": 1.0})
+    for text in ("10 Elm St Apt B201", "10 Elm St Unit B-201", "10 Elm St Apt 201"):
+        pa = parse_oneline(text)
+        assert score_candidate(rec, pa, [StreetKey.from_text(pa.street_text)], None, "")["match"]["unit_match"], text

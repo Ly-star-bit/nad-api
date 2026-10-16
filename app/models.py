@@ -21,12 +21,14 @@ Status = Literal[
 class VerifyRequest(BaseModel):
     """Either `address` (one line) or `street` (+ optional city/state/zip) is required."""
 
-    address: str | None = Field(None, examples=["1700 W Washington St, Phoenix, AZ 85007"])
-    street: str | None = Field(None, examples=["1700 W Washington St"])
-    unit: str | None = Field(None, examples=["Apt 2"])
-    city: str | None = Field(None, examples=["Phoenix"])
-    state: str | None = Field(None, examples=["AZ"])
-    zip: str | None = Field(None, examples=["85007"])
+    # Length limits: real addresses are well under 200 characters, and fuzzy street matching costs grow with the
+    # square of the length (a 100 KB street name against 2000 nearby points would hold the server for a minute).
+    address: str | None = Field(None, max_length=300, examples=["1700 W Washington St, Phoenix, AZ 85007"])
+    street: str | None = Field(None, max_length=200, examples=["1700 W Washington St"])
+    unit: str | None = Field(None, max_length=50, examples=["Apt 2"])
+    city: str | None = Field(None, max_length=100, examples=["Phoenix"])
+    state: str | None = Field(None, max_length=50, examples=["AZ"])
+    zip: str | None = Field(None, max_length=20, examples=["85007"])
     lat: float | None = Field(None, ge=-90, le=90, description="Skip geocoding and search around this point")
     lon: float | None = Field(None, ge=-180, le=180)
     zip_fallback: bool = Field(

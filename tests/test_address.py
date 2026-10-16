@@ -34,6 +34,17 @@ from app.address import StreetKey, norm_unit, parse_oneline, parse_structured, s
         ("1 Beacon St, Boston, MA 2108", 1, "", "Beacon St", "", "Boston", "MA", "02108"),
         ("12 Elm St, Phoenix, AZ 8500", 12, "", "Elm St", "", "Phoenix", "AZ", ""),
         ("100½ Oak Ave, Austin TX 78701", 100, "1/2", "Oak Ave", "", "Austin", "TX", "78701"),
+        # floors written as ordinals, alone or in the street line
+        ("100 Main St, 2nd Floor, Springfield, IL 62701", 100, "", "Main St", "2", "Springfield", "IL", "62701"),
+        ("100 Main St 2nd Fl, Springfield, IL 62701", 100, "", "Main St", "2", "Springfield", "IL", "62701"),
+        # a country at the end (order exports), with and without commas
+        ("1700 W Washington St, Phoenix, AZ 85007, USA", 1700, "", "W Washington St", "", "Phoenix", "AZ", "85007"),
+        ("1700 W Washington St Phoenix AZ 85007 US", 1700, "", "W Washington St", "", "Phoenix", "AZ", "85007"),
+        # Census' own format puts the ZIP in a segment of its own
+        ("100 MAIN ST, SPRINGFIELD, MA, 01151", 100, "", "MAIN ST", "", "SPRINGFIELD", "MA", "01151"),
+        ("123-A Main St, Phoenix, AZ 85007", 123, "A", "Main St", "", "Phoenix", "AZ", "85007"),
+        # line breaks inside a spreadsheet cell
+        ("123 Main St\nApt 5\nPhoenix, AZ 85007", 123, "", "Main St", "5", "Phoenix", "AZ", "85007"),
     ],
 )
 def test_parse_oneline(text, number, suffix, street, unit, city, state, zip5):
@@ -44,6 +55,11 @@ def test_parse_oneline(text, number, suffix, street, unit, city, state, zip5):
     assert pa.unit == unit
     assert (pa.city, pa.state, pa.zip5) == (city, state, zip5)
     assert "apt" not in pa.geocode_text.lower()
+
+
+def test_lone_full_state_name_stays_a_city():
+    pa = parse_oneline("123 Main St, Washington")
+    assert (pa.city, pa.state) == ("Washington", "")
 
 
 def test_parse_oneline_without_number():

@@ -39,8 +39,10 @@ NAD 查不到时用 **Overture Maps 地址数据** 兜底。
 - **Overture 只做能改变结论的查询**：NAD 已经是 `street_only` 时，Overture 只查门牌，不再做街道探测
   （探测最多得到同样的 `street_only`，而同级结论不会替换 NAD 的结果）。
 - **同一时刻的相同上游请求合并成一次**（批量里重复的地址、相邻地址的同一个县），结果照常进缓存。
-- **输入清洗**：全角逗号/数字/空格（中文输入法）、`Bldg 2 Apt 5` 这类多个单元标识、`PMB`、州全称（`Arizona`）、
-  被 Excel 去掉前导 0 的 ZIP（`MA 2108` → `02108`，只在补 0 后的 ZIP 属于该州时才补）、单元号前导 0（`Unit 0012` = `12`）；
+- **输入清洗**：全角逗号/数字/空格（中文输入法）、单元格内换行、末尾的国家（`, USA`）、`2nd Floor` 这类序数楼层、
+  `123-A` 门牌、ZIP 单独一段（Census 的 `CITY, ST, ZIP` 写法）、`Bldg 2 Apt 5` 这类多个单元标识、`PMB`、州全称（`Arizona`）、
+  被 Excel 去掉前导 0 的 ZIP（`MA 2108` → `02108`，只在补 0 后的 ZIP 属于该州时才补）、单元号前导 0（`Unit 0012` = `12`）、
+  楼栋和单元连写（`Apt B201` 对应 Building B + Unit 201）；
   `Pier Ave`、`Space Park Dr` 这类含单元关键词的街名不会被误当成单元。PO Box 返回 `invalid_input` 并说明原因。
 - **Census 匹配到多个地址**（如只写 `100 Main St, Springfield`，有 7 个州的 Springfield）：只核对第一个，
   `geocode.match_count` / `geocode.alternatives` 给出其他候选，`notes` 提示补上州或 ZIP。
@@ -91,7 +93,8 @@ docker build -t nad-api . && docker run -p 8000:8000 nad-api
   页面按每批 20 条调用 `/v1/verify/batch?stream=true`，每条查完立刻显示（不用等同批最慢的那条），可停止、继续、
   重试失败行；地图按结论着色显示每一行（没有匹配记录时用 Census 定位点），跟随筛选，点圆点看详情。
   导出 CSV 时原表的列原样保留，后面追加 `verify_status`、`verify_verdict`、`verify_confidence`、`verify_matched_address`、
-  `verify_nearest_number`（门牌不存在时同街最近的门牌）、`verify_census_matches`（Census 匹配到多个地址时的个数）等结果列。
+  `verify_nearest_number`（门牌不存在时同街最近的门牌）、`verify_census_matches`（Census 匹配到多个地址时的个数）、`verify_zip_should_be`（填的 ZIP 和记录不一致时，
+  记录里的 ZIP；地址存在但 ZIP 填错会让包裹分错，结果行里也会标出来）等结果列。
   有 10 行以上结果还没导出就离开页面时，浏览器会提示。
 - 页头的状态点显示各上游最近一次调用的结果，例如服务器连不上 Census 时会显示“Census 地理编码不可用”，
   鼠标悬停看具体错误。
@@ -115,7 +118,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
   -d '{"street":"11 W Washington St","unit":"Suite 240","city":"Phoenix","state":"AZ","zip":"85003"}'
 ```
 
-参数：`address`（单行）或 `street`+`city`/`state`/`zip`（结构化）；可选 `unit`、`lat`+`lon`（跳过地理编码）、
+参数（长度上限：`address` 300、`street` 200 个字符，超出返回 422）：`address`（单行）或 `street`+`city`/`state`/`zip`（结构化）；可选 `unit`、`lat`+`lon`（跳过地理编码）、
 `zip_fallback`（Census 编码失败时在整个 ZIP 区域搜索，较慢 3–20 s）、`overture_fallback`（默认 `true`）、`max_candidates`。
 
 返回要点：
@@ -205,7 +208,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 ## 测试
 
 ```bash
-.venv/bin/python -m pytest -q tests                      # 离线：解析/归一化、判定流程、Overture 映射、网页路由、上游客户端（76 个）
+.venv/bin/python -m pytest -q tests                      # 离线：解析/归一化、判定流程、Overture 映射、网页路由、上游客户端（87 个）
 .venv/bin/python scripts/smoke_test.py http://127.0.0.1:8000   # 在线：17 个真实地址端到端（含 Overture 兜底）
 ```
 

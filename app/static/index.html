@@ -146,7 +146,7 @@
 </div>
 
 <script type="module">
-import { STATUS, SOURCE, store, esc, tone, label, pct, fmtMs, setupKey, describeHttpError, showHealth, copyText } from './static/common.js';
+import { STATUS, SOURCE, store, esc, tone, label, pct, fmtMs, setupKey, describeHttpError, showHealth, copyText, zipMismatch } from './static/common.js';
 import { createMap, fit, colors, resultPoint } from './static/map.js';
 
 const $ = (s) => document.querySelector(s);
@@ -217,8 +217,10 @@ function renderResult(r) {
   const st = STATUS[r.status] || { t: r.status, tone: 'none' };
   const bm = r.best_match;
   const censusDown = r.status === 'upstream_error' && !r.geocode && (r.notes || []).some((n) => n.startsWith('census geocoder unavailable'));
+  const zipFix = zipMismatch(r);
   const desc = r.status === 'verified'
     ? (r.match_level === 'unit' ? '门牌、街道和单元号都有记录。' : '门牌和街道都有记录。')
+      + (zipFix ? `但 ZIP 不对：输入的是 ${r.parsed.zip}，记录里是 ${zipFix}。` : '')
     : censusDown ? '连不上 Census 地理编码服务，没法给地址定位，这不代表地址有问题。一直这样的话，多半是服务器访问 census.gov 的网络不通，原因见下方服务端说明。'
     : st.d || '';
   document.title = `${st.t} · ${r.input} — NAD 地址校验`;

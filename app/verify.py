@@ -113,7 +113,10 @@ def score_candidate(rec: dict, pa: ParsedAddress, keys: list[StreetKey], origin:
 
     unit_vals = _unit_values(rec)
     if pa.unit:
-        unit_match: bool | None = any(norm_unit(v) == pa.unit for v in unit_vals)
+        sub = rec["subaddress"]
+        # "Apt B201" / "Unit 2-201" against Building B + Unit 201: building or floor joined to the unit counts too
+        joined = [f"{b}{sub['unit']}" for b in (sub.get("building"), sub.get("floor")) if b and sub.get("unit")]
+        unit_match: bool | None = any(norm_unit(v) == pa.unit for v in unit_vals + joined)
     else:
         unit_match = None
 
@@ -280,17 +283,16 @@ async def _nad_near_phase(up: Upstream, pa: ParsedAddress, geocode: dict, keys: 
         """Is the street itself in the NAD here? Pull every point nearby and match streets locally."""
         nonlocal probe
         if probe is None:
-            tp = time.perf_counter()
+            tp, note = time.perf_counter(), None
             try:
                 nearby, truncated = await up.nad_near(*origin, STREET_PROBE_RADIUS_M)
                 if truncated:
-                    notes.append(f"dense area: street probe hit the 2000-point limit within {STREET_PROBE_RADIUS_M} m, suggestions may be incomplete")
+                    note = f"dense area: street probe hit the 2000-point limit within {STREET_PROBE_RADIUS_M} m, suggestions may be incomplete"
             except UpstreamError as exc:
-                nearby = None
-                notes.append(f"street probe failed: {exc.message}")
+                nearby, note = None, f"street probe failed: {exc.message}"
             timings["street_probe"] = round((time.perf_counter() - tp) * 1000, 1)
             out["nad_points_nearby"] = len(nearby) if nearby is not None else None
-            probe = {"nearby": nearby, "same": same_street(nearby or [], pa, keys, origin, ref_zip)}
+            probe = {"nearby": nearby, "same": same_street(nearby or [], pa, keys, origin, ref_zip), "note": note}
         return probe
 
     coverage_task = asyncio.create_task(timed_coverage())
@@ -331,6 +333,7 @@ async def _nad_near_phase(up: Upstream, pa: ParsedAddress, geocode: dict, keys: 
         p = await street_probe()
         suggestions = build_suggestions(p["same"], pa, max_candidates)
         area_empty = p["nearby"] == []
+        notes += [p["note"]] if p["note"] else []  # only said when the answer rests on the probe
 
     return decide(pa, scored, suggestions, dataset="NAD", ref_zip=ref_zip, max_candidates=max_candidates,
                   coverage=out["coverage"], area_empty=area_empty, notes=notes)
