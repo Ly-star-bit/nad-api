@@ -1,0 +1,710 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>批量校验 · NAD 地址校验</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='2' y='2' width='12' height='12' fill='none' stroke='%231b1a17' stroke-width='3.5'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="static/style.css">
+<style>
+/* ---- input: textarea or a loaded file, with a toolbar strip ---- */
+.box { background: var(--surface); border: 1.5px solid var(--ink); }
+.box:focus-within, .box.drop { box-shadow: 0 0 0 3px var(--focus); }
+.box textarea {
+  display: block; width: 100%; min-height: 230px; resize: vertical; border: 0; outline: none;
+  background: transparent; color: var(--ink); font: 13.5px/1.75 var(--mono); padding: 14px 18px;
+}
+.box textarea::placeholder { color: var(--muted); opacity: .8; }
+.filebox { min-height: 230px; padding: 16px 18px; }
+.filebox .name { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+.filebox .name b { font-weight: 600; overflow-wrap: anywhere; }
+.filebox .name .linkbtn { font-size: 13px; white-space: nowrap; }
+.filebox ol { margin: 12px 0 0; padding: 0; list-style: none; font: 13px/1.75 var(--mono); color: var(--ink-2); }
+.filebox li { display: grid; grid-template-columns: 3em 1fr; }
+.filebox li span { color: var(--muted); }
+.filebox .more { margin-top: 6px; font-size: 12.5px; color: var(--muted); }
+.strip { display: flex; align-items: stretch; border-top: 1px solid var(--rule); font-size: 13.5px; }
+.strip .meta { flex: 1; min-width: 0; padding: 11px 18px; color: var(--ink-2); }
+.strip .meta b { color: var(--ink); font-weight: 600; }
+.strip .tools { display: flex; align-items: center; gap: 18px; padding: 0 18px; white-space: nowrap; }
+.strip .go { font-size: 15px; padding: 0 26px; }
+
+/* ---- run: progress, status meter, filter chips, rows ---- */
+.run { background: var(--surface); border: 1px solid var(--rule); }
+.run-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px 24px; padding: 20px 28px 14px; }
+.progress { margin: 0; font-size: 14px; color: var(--ink-2); }
+.progress b { font-size: 24px; font-weight: 600; color: var(--ink); margin-right: 3px; }
+.run-actions { display: flex; flex-wrap: wrap; gap: 6px 20px; font-size: 13.5px; }
+.meter { display: flex; gap: 2px; height: 10px; margin: 0 28px; }
+.meter span { flex: 1 1 0; min-width: 3px; background: var(--fill); cursor: pointer; }
+.meter .rest { background: var(--rule-2); cursor: default; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px 22px; padding: 12px 28px 14px; border-bottom: 1px solid var(--rule); font-size: 13.5px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 7px; padding: 3px 0; cursor: pointer;
+  background: none; border: 0; border-bottom: 2px solid transparent; color: var(--ink-2);
+}
+.chip b { font-weight: 600; color: var(--ink); }
+.chip:hover { color: var(--ink); }
+.chip[aria-pressed="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+.notice .err { border-width: 0 0 1px; }
+.run .map { height: 380px; }
+.pop-st { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.pop-st .na { margin-left: auto; font: 12px var(--mono); }
+.pop-in { margin-top: 6px; color: var(--ink-2); }
+.pop-m { margin-top: 2px; font: 12px/1.5 var(--mono); text-transform: uppercase; }
+.pop-m.na { font-family: var(--sans); text-transform: none; }
+.pop-foot { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; font-size: 12.5px; color: var(--muted); }
+.map .pop-foot a { color: var(--accent); text-decoration: none; white-space: nowrap; }
+.map .pop-foot a:hover { text-decoration: underline; }
+
+.rows-wrap { padding: 0 28px 10px; }
+.rows th {
+  position: sticky; top: 0; z-index: 1; padding: 12px 14px 8px 0;
+  background: var(--surface); box-shadow: inset 0 -1px var(--rule);
+}
+.rows td { padding: 10px 14px 10px 0; }
+.rows .c-n { width: 3.2em; color: var(--muted); font-family: var(--mono); font-size: 12.5px; }
+.rows .c-in { width: 31%; color: var(--ink-2); overflow-wrap: anywhere; }
+.rows .c-st { width: 7.5em; white-space: nowrap; font-weight: 600; }
+.rows .c-st .sq { margin-right: 8px; vertical-align: 1px; }
+.rows .c-m { font: 12.5px/1.6 var(--mono); text-transform: uppercase; overflow-wrap: anywhere; }
+.rows .c-m .na, .rows .c-m .e { font-family: var(--sans); text-transform: none; }
+.rows .c-src { width: 5.5em; white-space: nowrap; color: var(--ink-2); }
+.rows .c-conf { width: 4.5em; text-align: right; white-space: nowrap; color: var(--ink-2); }
+.rows .c-go { width: 2.5em; text-align: right; white-space: nowrap; padding-right: 0; }
+.rows .c-go a { color: var(--accent); text-decoration: none; font-size: 13px; }
+.rows .c-go a:hover { text-decoration: underline; }
+.rows tr.wait td { color: var(--muted); }
+.rows .e { color: var(--bad); font-size: 13px; }
+.busy { animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .busy { animation: none; } }
+.nothing { padding: 18px 0 10px; color: var(--muted); font-size: 14px; }
+
+.legend td.lg { width: 10em; }
+.legend td code { color: var(--ink); }
+
+@media (max-width: 680px) {
+  .box textarea, .filebox { min-height: 180px; padding: 12px 14px; font-size: 13px; }
+  .strip { flex-wrap: wrap; }
+  .strip .meta { flex-basis: 100%; padding: 10px 14px 0; }
+  .strip .tools { flex: 1; padding: 10px 14px; gap: 14px; }
+  .strip .go { padding: 12px 20px; }
+  .run-head, .chips { padding-left: 16px; padding-right: 16px; }
+  .run .map { height: 260px; }
+  .meter { margin: 0 16px; }
+  .rows-wrap { padding: 0 16px 10px; }
+  .rows thead { display: none; }
+  .rows tr {
+    display: grid; grid-template-columns: auto 1fr auto auto; gap: 3px 12px; padding: 11px 0;
+    grid-template-areas: "n st conf go" "in in in in" "m m m m"; border-top: 1px solid var(--rule-2);
+  }
+  .rows td, .rows td.c-n, .rows td.c-in, .rows td.c-st, .rows td.c-conf, .rows td.c-go { width: auto; padding: 0; border: 0; }
+  .rows .c-n { grid-area: n; }
+  .rows .c-st { grid-area: st; }
+  .rows .c-conf { grid-area: conf; }
+  .rows .c-go { grid-area: go; }
+  .rows .c-in { grid-area: in; }
+  .rows .c-m { grid-area: m; }
+  .rows .c-src { display: none; }
+  .legend td.lg { width: 6.5em; white-space: normal; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="./"><span class="brand-mark"></span>NAD 地址校验</a>
+    <nav>
+      <span id="health" class="health"><i></i><span>检查服务…</span></span>
+      <a href="./">单条校验</a>
+      <a href="batch" aria-current="page">批量校验</a>
+      <a href="docs">接口文档</a>
+    </nav>
+  </header>
+
+  <section class="intro">
+    <h1>批量校验地址</h1>
+    <p>粘贴一批地址或者上传 CSV，结果边查边出。查完可以导出 CSV，原表的列原样保留。每次最多 500 行。</p>
+  </section>
+
+  <form id="form" autocomplete="off">
+    <div id="box" class="box">
+      <label for="text" class="sr">地址列表</label>
+      <textarea id="text" spellcheck="false" placeholder="每行一个地址，例如&#10;1700 W Washington St, Phoenix, AZ 85007&#10;980 9th St Ste 1750, Sacramento, CA 95814&#10;&#10;也可以从 Excel 复制多列粘贴，或者把 CSV 文件拖到这里。⌘/Ctrl + Enter 开始校验。"></textarea>
+      <div id="filebox" class="filebox" hidden></div>
+      <div class="strip">
+        <div id="meta" class="meta">还没有地址</div>
+        <div class="tools">
+          <button type="button" class="pick" data-upload>上传 CSV</button>
+          <button type="button" class="pick" data-sample>填入示例</button>
+          <button type="button" class="pick" data-reset>清空</button>
+        </div>
+        <button id="go" class="go" type="submit">开始校验</button>
+      </div>
+    </div>
+    <input id="pick" type="file" accept=".csv,.tsv,.txt,text/csv,text/plain" hidden>
+    <div class="opts">
+      <label><input id="ov" type="checkbox" checked>NAD 查不到时用 Overture 补查</label>
+      <label><input id="zf" type="checkbox">定位失败时按 ZIP 范围搜索（较慢）</label>
+    </div>
+    <div id="keyrow" class="keyrow" hidden>
+      <label for="key">API Key</label>
+      <input id="key" type="password" autocomplete="off" spellcheck="false">
+      <span>只保存在当前浏览器</span>
+    </div>
+  </form>
+
+  <main id="out"></main>
+
+  <footer>
+    数据来自 USDOT National Address Database、US Census Geocoder 和 Overture Maps，展示 Overture 数据时请遵循其<a href="https://docs.overturemaps.org/attribution" target="_blank" rel="noopener">署名要求</a>。校验结果只说明地址点存在，不代表 USPS 可以投递。
+  </footer>
+</div>
+
+<script type="module">
+import { STATUS, SOURCE, esc, label, pct, setupKey, describeHttpError, showHealth } from './static/common.js';
+import { createMap, fit, colors, resultPoint } from './static/map.js';
+
+const MAX_ROWS = 500;
+const CHUNK = 10;  // addresses per /v1/verify/batch call, one call in flight (the server runs 5 of them concurrently)
+const MISSING = '缺少街道地址，不会校验';
+
+const $ = (s) => document.querySelector(s);
+const form = $('#form'), box = $('#box'), text = $('#text'), filebox = $('#filebox'), meta = $('#meta');
+const go = $('#go'), pick = $('#pick'), ov = $('#ov'), zf = $('#zf'), out = $('#out');
+const key = setupKey($('#keyrow'), $('#key'));
+
+// Result buckets in display order; the counts, the meter and the filter chips all follow it.
+const KIND = { ...STATUS, error: { t: '出错', tone: 'bad' } };
+const ORDER = Object.keys(KIND);
+
+const SAMPLE = [
+  '1700 W Washington St, Phoenix, AZ 85007',
+  '350 5th Ave, New York, NY 10118',
+  '980 9th St Ste 1750, Sacramento, CA 95814',
+  '980 9th St Ste 9999, Sacramento, CA 95814',
+  '1716 W Washington St, Phoenix, AZ 85007',
+  '1600 Amphitheatre Pkwy, Mountain View, CA 94043',
+  '200 N Spring St, Los Angeles, CA 90012',
+  '123 Fakestreet Blvd, Phoenix AZ 85007',
+  'asdkjh qwe zzz',
+].join('\n');
+
+// Header names we recognise, after lower-casing and dropping spaces and _ - . : #
+const HEADERS = {
+  address: ['address', 'fulladdress', 'addr', 'singlelineaddress', '地址', '完整地址'],
+  street: ['street', 'streetaddress', 'address1', 'addressline1', 'line1', 'street1', '街道', '街道地址'],
+  unit: ['unit', 'address2', 'addressline2', 'line2', 'apt', 'suite', 'apartment', '单元', '单元号'],
+  city: ['city', 'town', '城市'],
+  state: ['state', 'st', '州'],
+  zip: ['zip', 'zipcode', 'zip5', 'postal', 'postalcode', 'postcode', '邮编'],
+};
+
+// ------------------------------------------------------------------ parsing
+
+const normHead = (s) => s.toLowerCase().replace(/[\s_.\-:#]/g, '');
+
+function parsePaste(s) {
+  // comma is never a delimiter here: one-line addresses are full of them. Tabs come from Excel.
+  return s.split(/\r?\n/).map((l) => (l.includes('\t') ? l.split('\t') : [l]));
+}
+
+function parseCsv(s, delim) {  // RFC 4180
+  const rows = [];
+  let row = [], cell = '', quoted = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (quoted) {
+      if (c !== '"') cell += c;
+      else if (s[i + 1] === '"') { cell += '"'; i++; }
+      else quoted = false;
+    } else if (c === '"' && cell === '') quoted = true;
+    else if (c === delim) { row.push(cell); cell = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && s[i + 1] === '\n') i++;
+      row.push(cell); rows.push(row); row = []; cell = '';
+    } else cell += c;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+function sniffDelimiter(s, name) {
+  if (/\.tsv$/i.test(name)) return '\t';
+  const first = s.split(/\r?\n/, 1)[0];
+  const n = (d) => first.split(d).length;
+  return [',', '\t', ';'].reduce((a, b) => (n(b) > n(a) ? b : a));
+}
+
+// No header, several columns: "1700 W Washington St | Phoenix | AZ | 85007". A comma between state and
+// ZIP would make the parser drop the state, so those two are joined with a space.
+function joinCells(cells) {
+  return cells.filter(Boolean).reduce((s, c, i, a) =>
+    (i === 0 ? c : s + (/^\d{5}(-\d{4})?$/.test(c) && /^[A-Za-z]{2}$/.test(a[i - 1]) ? ' ' : ', ') + c), '');
+}
+
+const oneLine = (f) => [[f.street, f.unit].filter(Boolean).join(' '), f.city, [f.state, f.zip].filter(Boolean).join(' ')]
+  .filter(Boolean).join(', ');
+
+// table (array of rows of cells) -> { header, rows: [{ cells, req, input }], total, info, bad }
+function buildSource(table) {
+  table = table.map((r) => r.map((c) => (c || '').trim())).filter((r) => r.some(Boolean));
+  if (!table.length) return { header: [], rows: [], total: 0, info: '' };
+
+  const map = {};
+  table[0].forEach((c, i) => {
+    const h = normHead(c);
+    for (const [k, names] of Object.entries(HEADERS)) if (!(k in map) && names.includes(h)) map[k] = i;
+  });
+  const hasHeader = Object.keys(map).length > 0;
+  const data = hasHeader ? table.slice(1) : table;
+  const width = Math.max(...table.map((r) => r.length));
+  const header = Array.from({ length: width }, (_, i) =>
+    (hasHeader && table[0][i]) || (width === 1 && !hasHeader ? 'input' : `column_${i + 1}`));
+  const col = (r, k) => (k in map ? r[map[k]] || '' : '');
+  const name = (k) => table[0][map[k]];
+
+  let info, make;
+  if (hasHeader && !('street' in map) && !('address' in map)) {
+    return { header, rows: [], total: data.length, bad: true, info: '表头里没有地址列：需要 address，或者 street（可配合 city / state / zip）' };
+  }
+  if (hasHeader && ('street' in map || ['city', 'state', 'zip'].some((k) => k in map))) {
+    // Columns -> structured request; the server geocodes those fields directly.
+    const streetKey = 'street' in map ? 'street' : 'address';
+    info = '按列组合：' + [streetKey, 'unit', 'city', 'state', 'zip'].filter((k) => k in map).map(name).join(' + ');
+    make = (r) => {
+      const f = { street: col(r, streetKey), unit: col(r, 'unit'), city: col(r, 'city'), state: col(r, 'state'), zip: col(r, 'zip') };
+      const req = Object.fromEntries(Object.entries(f).filter(([, v]) => v));
+      return { req: f.street ? req : null, input: oneLine(f) };
+    };
+  } else if (hasHeader) {
+    info = '地址列：' + name('address') + ('unit' in map ? ` + ${name('unit')}` : '');
+    make = (r) => {
+      const a = col(r, 'address'), u = col(r, 'unit');
+      return { req: a ? (u ? { address: a, unit: u } : { address: a }) : null, input: a, q: a, unit: u };
+    };
+  } else if (width === 1) {
+    info = '每行一个地址';
+    make = (r) => ({ req: r[0] ? { address: r[0] } : null, input: r[0] });
+  } else {
+    info = '没有识别到表头，各列已合并成一行地址';
+    make = (r) => { const a = joinCells(r); return { req: a ? { address: a } : null, input: a }; };
+  }
+  return { header, rows: data.slice(0, MAX_ROWS).map((cells) => ({ cells, ...make(cells) })), total: data.length, info };
+}
+
+// ------------------------------------------------------------------ input box
+
+let file = null;  // { name, table } once a CSV is loaded; null = textarea
+let src = buildSource([]);
+
+function refresh() {
+  src = buildSource(file ? file.table : parsePaste(text.value));
+  if (src.bad) meta.innerHTML = `<span class="w">${esc(src.info)}</span>`;
+  else if (!src.rows.length) meta.textContent = file ? '文件里没有数据行' : '还没有地址';
+  else {
+    meta.innerHTML = `<b>${src.rows.length}</b> 个地址<span class="sep">/</span>${esc(src.info)}` + (src.total > MAX_ROWS
+      ? `<span class="sep">/</span><span class="w">文件共 ${src.total} 行，超过 ${MAX_ROWS} 行上限，只校验前 ${MAX_ROWS} 行</span>` : '');
+  }
+  text.hidden = Boolean(file);
+  filebox.hidden = !file;
+  if (file) {
+    const shown = src.rows.slice(0, 5);
+    filebox.innerHTML = `<div class="name"><b>${esc(file.name)}</b><button type="button" class="linkbtn" data-unload>移除文件，改为粘贴</button></div>
+      <ol>${shown.map((r, i) => `<li><span>${i + 1}</span><div>${esc(r.input)}${r.req ? '' : ` <span>（${MISSING}）</span>`}</div></li>`).join('')}</ol>
+      ${src.rows.length > shown.length ? `<div class="more">…还有 ${src.rows.length - shown.length} 行</div>` : ''}`;
+  }
+}
+
+function changed() {
+  refresh();
+  if (run) dirty = true;
+  updateButton();
+}
+
+async function loadFile(f) {
+  if (!f) return;
+  if (f.size > 5e6) { meta.innerHTML = '<span class="w">文件超过 5 MB，请拆分后再上传</span>'; return; }
+  const buf = await f.arrayBuffer();
+  let s;
+  try { s = new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { s = new TextDecoder('gbk').decode(buf); }  // Excel on Chinese Windows saves GBK
+  s = s.replace(/^﻿/, '');
+  if (/\.txt$/i.test(f.name)) { file = null; text.value = s; }
+  else file = { name: f.name, table: parseCsv(s, sniffDelimiter(s, f.name)) };
+  changed();
+}
+
+// ------------------------------------------------------------------ run
+
+let run = null;      // { name, header, rows: [{ n, cells, req, input, state, result, error }], activeMs, segStart, netDone }
+let active = null;   // AbortController of the running pump; null when stopped
+let dirty = false;   // input changed since the run was created
+let filter = 'all';
+let notice = null;   // { title, msg } shown above the results when a run had to pause
+let chunkSize = CHUNK;
+
+const bucket = (r) => (r.state !== 'done' ? 'pending' : r.result ? r.result.status : 'error');
+const retryable = (r) => r.req && r.state === 'done' && (!r.result || r.result.status === 'upstream_error');
+
+function startRun() {
+  refresh();
+  if (!src.rows.length) { if (!file) text.focus(); return; }
+  run = {
+    name: file ? file.name : null,
+    header: src.header,
+    rows: src.rows.map((r, i) => ({
+      ...r, n: i + 1, state: r.req ? 'pending' : 'done', result: null, error: r.req ? null : MISSING,
+    })),
+    activeMs: 0, segStart: 0, netDone: 0,
+  };
+  dirty = false;
+  filter = 'all';
+  userMoved = false;
+  chunkSize = CHUNK;
+  pump();
+}
+
+async function pump() {
+  if (active || !run) return;
+  const me = (active = new AbortController());
+  const R = run, t0 = (run.segStart = performance.now());  // a stopped pump may finish after a new run starts
+  notice = null;
+  render();
+  try {
+    while (active === me) {
+      const chunk = R.rows.filter((r) => r.state === 'pending').slice(0, chunkSize);
+      if (!chunk.length) break;
+      chunk.forEach((r) => { r.state = 'running'; r.owner = me; });
+      render();
+      const opts = { overture_fallback: ov.checked, zip_fallback: zf.checked };
+      const hadKey = key.has();
+      let res = null, body = null;
+      try {
+        res = await fetch('v1/verify/batch', {
+          method: 'POST', signal: me.signal,
+          headers: { 'Content-Type': 'application/json', ...key.headers() },
+          body: JSON.stringify({ addresses: chunk.map((r) => ({ ...r.req, ...opts })) }),
+        });
+        body = await res.json().catch(() => null);
+      } catch { /* network error, or aborted by stop() */ }
+      if (active !== me || !res) {  // stopped (possibly mid-body), or the server is unreachable
+        chunk.forEach((r) => { if (r.owner === me && r.state === 'running') r.state = 'pending'; });
+        if (!res && active === me) notice = { title: '连不上服务', msg: '请确认服务正在运行，然后点「继续」。' };
+        break;
+      }
+      if (res.ok && body && Array.isArray(body.results)) {
+        for (const it of body.results) {
+          const r = chunk[it.index];
+          if (r) Object.assign(r, { state: 'done', result: it.result || null, error: it.result ? null : it.error || '未知错误' });
+        }
+        chunk.forEach((r) => { if (r.state === 'running') Object.assign(r, { state: 'done', error: '服务端没有返回这一行' }); });
+        R.netDone += chunk.length;
+      } else if (res.status === 413 && chunkSize > 1) {  // NAD_MAX_BATCH_SIZE was set below our chunk size
+        chunkSize = Math.max(1, Math.floor(chunkSize / 2));
+        chunk.forEach((r) => { r.state = 'pending'; });
+      } else if (res.status === 401 || res.status === 429) {
+        chunk.forEach((r) => { r.state = 'pending'; });
+        const e = describeHttpError(res.status, body, hadKey);
+        if (e.needKey) key.reveal();
+        notice = { title: e.title, msg: e.needKey ? '这个服务开启了鉴权。在上方填写 API Key 后点「继续」。' : '超过了每分钟的请求上限，等一分钟后点「继续」。' };
+        break;
+      } else {
+        const e = describeHttpError(res.status, body, hadKey);
+        chunk.forEach((r) => Object.assign(r, { state: 'done', error: `${e.title}：${e.msg}` }));
+      }
+      render();
+    }
+  } finally {
+    R.activeMs += performance.now() - t0;
+    if (active === me) active = null;
+    render();
+  }
+}
+
+function stop() {
+  if (!active) return;
+  active.abort();
+  active = null;
+  run.rows.forEach((r) => { if (r.state === 'running') r.state = 'pending'; });
+  render();
+}
+
+function retryFailed() {
+  run.rows.filter(retryable).forEach((r) => Object.assign(r, { state: 'pending', result: null, error: null }));
+  pump();
+}
+
+// ------------------------------------------------------------------ rendering
+
+const clock = (ms) => { const s = Math.round(ms / 1000); return s < 1 ? '不到 1 秒' : s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${s % 60} 秒`; };
+const elapsed = () => run.activeMs + (active ? performance.now() - run.segStart : 0);
+
+function counts() {
+  const c = { pending: 0 };
+  for (const r of run.rows) { const b = bucket(r); c[b] = (c[b] || 0) + 1; }
+  return c;
+}
+
+function progressHtml(c) {
+  const total = run.rows.length, done = total - c.pending, t = elapsed();
+  const sep = '<span class="sep">/</span>';
+  if (active) {
+    return `<b>${done}</b> / ${total} 已完成${sep}用时 ${clock(t)}`
+      + (run.netDone && c.pending ? `${sep}预计还要 ${clock((t / run.netDone) * c.pending)}` : '');
+  }
+  return c.pending ? `<b>${done}</b> / ${total} 已完成${sep}已暂停` : `<b>${total}</b> 行全部完成${sep}用时 ${clock(t)}`;
+}
+
+function render() {
+  updateButton();
+  if (!run) { dropMap(); out.innerHTML = guideHtml(); return; }
+  if (!out.querySelector('.run')) {  // built once; later renders fill the parts so the map inside survives
+    dropMap();
+    out.innerHTML = `<section class="run">
+        <div class="notice"></div>
+        <div class="run-head"><p class="progress" id="progress"></p><div class="run-actions"></div></div>
+        <div class="meter"></div>
+        <div class="chips"></div>
+        <div class="map-sec"><div id="bmap" class="map"></div><div class="map-key"></div></div>
+        <div class="rows-wrap"></div>
+      </section>`;
+    initMap();
+  }
+  const c = counts(), total = run.rows.length, done = total - c.pending;
+  const keys = [...ORDER, ...Object.keys(c).filter((k) => k !== 'pending' && !ORDER.includes(k))].filter((k) => c[k]);
+  if (filter !== 'all' && !c[filter]) filter = 'all';
+  const kind = (k) => KIND[k] || { t: k, tone: 'none' };
+  const failed = run.rows.filter(retryable).length;
+
+  const actions = [
+    !active && failed ? `<button type="button" class="linkbtn" data-retry>重试失败的 ${failed} 行</button>` : '',
+    done ? `<button type="button" class="linkbtn" data-export>${c.pending ? `导出 CSV（已完成 ${done} 行）` : '导出 CSV'}</button>` : '',
+  ].join('');
+
+  const meter = keys.map((k) => `<span class="t-${kind(k).tone}" style="flex-grow:${c[k]}" data-filter="${esc(k)}"
+      title="${esc(kind(k).t)}：${c[k]} 行（${pct(c[k] / total)}）"></span>`).join('')
+    + (c.pending ? `<span class="rest" style="flex-grow:${c.pending}" title="未完成：${c.pending} 行"></span>` : '');
+
+  const chip = (k, t, n, tn) => `<button type="button" class="chip${tn ? ` t-${tn}` : ''}" data-filter="${esc(k)}"
+      aria-pressed="${filter === k}">${tn ? '<span class="sq"></span>' : ''}${esc(t)}<b>${n}</b></button>`;
+  const chips = chip('all', '全部', total) + keys.map((k) => chip(k, kind(k).t, c[k], kind(k).tone)).join('')
+    + (c.pending ? chip('pending', '未完成', c.pending) : '');
+
+  const shown = run.rows.filter((r) => filter === 'all' || bucket(r) === filter);
+  const part = (sel, html) => { out.querySelector(sel).innerHTML = html; };
+  part('.notice', notice ? `<div class="err"><strong>${esc(notice.title)}</strong><p>${esc(notice.msg)}</p></div>` : '');
+  part('#progress', progressHtml(c));
+  part('.run-actions', actions);
+  part('.meter', meter);
+  part('.chips', chips);
+  part('.rows-wrap', `<table class="rows">
+      <thead><tr><th class="c-n">#</th><th class="c-in">输入</th><th class="c-st">结论</th><th class="c-m">匹配到的地址</th>
+        <th class="c-src">来源</th><th class="c-conf">置信度</th><th class="c-go"></th></tr></thead>
+      <tbody>${shown.map(rowHtml).join('')}</tbody>
+    </table>${shown.length ? '' : '<p class="nothing">没有这类结果。</p>'}`);
+  drawMarkers(shown);
+}
+
+// ------------------------------------------------------------------ map
+
+let bmap = null;        // { L, map, layer, marks: Map(row -> marker), theme }
+let mapReq = 0;         // latest createMap call; an older one that finishes late is dropped
+let userMoved = false;  // stop auto-fitting once the user has touched the map
+
+function dropMap() {
+  mapReq++;
+  if (bmap) { bmap.map.remove(); bmap = null; }
+}
+
+async function initMap() {
+  const id = ++mapReq, el = document.getElementById('bmap');
+  let made = null;
+  try { made = await createMap(el, { canvas: true }); } catch { /* reported below */ }
+  if (id !== mapReq || !el.isConnected) { if (made) made.map.remove(); return; }
+  if (!made) { el.innerHTML = '<p class="map-fail">地图组件加载失败</p>'; return; }
+  bmap = { ...made, layer: made.L.layerGroup().addTo(made.map), marks: new Map(), theme: null };
+  el.addEventListener('pointerdown', () => { userMoved = true; });
+  render();
+}
+
+// Markers are diffed, not redrawn, so an open popup survives the next chunk landing.
+function drawMarkers(shown) {
+  const placed = [];
+  let missing = 0;
+  for (const r of shown) {
+    if (r.state !== 'done') continue;
+    if (resultPoint(r.result)) placed.push(r); else missing++;
+  }
+  out.querySelector('.map-key').innerHTML = `<span>地图上 ${placed.length} 个点</span>`
+    + (missing ? `<span>${missing} 行没有坐标（无法定位、无法解析或出错）</span>` : '')
+    + (placed.length ? '<span class="na">点圆点看详情</span>' : '');
+  if (!bmap) return;
+
+  const { L, map, layer, marks } = bmap, c = colors();
+  if (bmap.theme !== c.ok) { layer.clearLayers(); marks.clear(); bmap.theme = c.ok; }  // colour scheme flipped
+  const want = new Set(placed);
+  for (const [r, m] of marks) {
+    if (!want.has(r) || m.bucket !== bucket(r)) { layer.removeLayer(m); marks.delete(r); }
+  }
+  for (const r of placed) {
+    if (marks.has(r)) continue;
+    const p = resultPoint(r.result), k = KIND[bucket(r)] || { tone: 'none' };
+    const m = L.circleMarker([p.lat, p.lon], { radius: 6, color: c.surface, weight: 2, fillColor: c[k.tone], fillOpacity: 1 })
+      .bindPopup(() => popupHtml(r), { minWidth: 220, maxWidth: 320 });
+    m.bucket = bucket(r);
+    marks.set(r, m.addTo(layer));
+  }
+  for (const m of marks.values()) if (m.bucket !== 'verified') m.bringToFront();  // problems stay visible on top
+  if (!userMoved) fit(map, placed.map((r) => { const p = resultPoint(r.result); return [p.lat, p.lon]; }));
+}
+
+function popupHtml(r) {
+  const k = KIND[bucket(r)] || { t: bucket(r), tone: 'none' }, x = r.result, bm = x.best_match;
+  return `<div class="pop">
+      <div class="pop-st t-${k.tone}"><span class="sq"></span>${esc(k.t)}<span class="na">#${r.n}</span></div>
+      <div class="pop-in">${esc(r.input)}</div>
+      ${bm ? `<div class="pop-m">${esc(bm.formatted)}</div>` : '<div class="pop-m na">没有匹配记录，圆点是 Census 定位点</div>'}
+      <div class="pop-foot"><span>${x.data_source ? `${SOURCE[x.data_source]}，置信度 ${pct(x.confidence)}` : ''}</span>
+        <a href="${esc(detailUrl(r))}" target="_blank" rel="noopener">详情 ↗</a></div>
+    </div>`;
+}
+
+function rowHtml(r) {
+  let st, m = '', from = '', conf = '', more = '';
+  if (r.state === 'pending') st = '<span class="na">等待</span>';
+  else if (r.state === 'running') st = '<span class="na busy">查询中</span>';
+  else {
+    const k = KIND[bucket(r)] || { t: bucket(r), tone: 'none' };
+    st = `<span class="t-${k.tone}"><span class="sq"></span>${esc(k.t)}</span>`;
+    const x = r.result;
+    if (x) {
+      const bm = x.best_match, near = (x.suggestions || [])[0];
+      m = bm ? esc(bm.formatted) : near ? `<span class="na">最近门牌</span> ${esc(near.formatted)}` : '<span class="na">—</span>';
+      from = SOURCE[x.data_source] || '—';
+      conf = x.data_source ? pct(x.confidence) : '—';
+    } else {
+      m = `<span class="e">${esc(r.error)}</span>`;
+    }
+    if (r.req) more = `<a href="${esc(detailUrl(r))}" target="_blank" rel="noopener">详情</a>`;
+  }
+  const input = esc(r.input) + (r.unit ? ` <span class="na">${esc(r.unit)}</span>` : '');
+  return `<tr${r.state === 'done' ? '' : ' class="wait"'}><td class="c-n">${r.n}</td>
+    <td class="c-in">${input || '<span class="na">（空）</span>'}</td><td class="c-st">${st}</td><td class="c-m">${m}</td>
+    <td class="c-src">${from}</td><td class="c-conf">${conf}</td><td class="c-go">${more}</td></tr>`;
+}
+
+function detailUrl(r) {
+  const p = new URLSearchParams({ q: r.q || r.input });
+  if (zf.checked) p.set('zip_fallback', '1');
+  if (!ov.checked) p.set('overture', '0');
+  return `./?${p}`;
+}
+
+function guideHtml() {
+  const row = (k, v) => `<tr><td class="lg">${k}</td><td>${v}</td></tr>`;
+  return `<section class="legend"><h2>支持的输入</h2><table>
+    ${row('每行一个地址', '一行写完整地址，例如 <code>1700 W Washington St, Phoenix, AZ 85007</code>')}
+    ${row('从 Excel 复制', '直接粘贴多列。第一行是表头时按列名识别，没有表头就把各列按顺序拼成一行地址')}
+    ${row('上传 CSV', '表头用 <code>address</code>，或者 <code>street</code> / <code>unit</code> / <code>city</code> / <code>state</code> / <code>zip</code>，也认“地址、街道、城市、州、邮编”。UTF-8 和 GBK 编码都可以')}
+    ${row('导出', '原表的列原样保留，后面追加 <code>verify_status</code>、<code>verify_verdict</code>、<code>verify_matched_address</code> 等结果列')}
+  </table></section>`;
+}
+
+function updateButton() {
+  const pending = run && run.rows.some((r) => r.state !== 'done');
+  go.textContent = active ? '停止' : run && !dirty ? (pending ? '继续' : '重新校验') : '开始校验';
+}
+
+setInterval(() => {
+  const el = document.getElementById('progress');
+  if (el && run && active) el.innerHTML = progressHtml(counts());
+}, 1000);
+
+// ------------------------------------------------------------------ export
+
+const RESULT_COLS = ['verify_status', 'verify_verdict', 'verify_confidence', 'verify_data_source', 'verify_matched_address',
+  'verify_lat', 'verify_lon', 'verify_record_source', 'verify_notes'];
+
+function csvCell(v) {
+  let s = v == null ? '' : String(v);
+  // a text cell starting with = + @ (or - not followed by a number) would run as a formula in Excel
+  if (typeof v === 'string' && (/^[=+@\t\r]/.test(s) || /^-(?![\d.])/.test(s))) s = `'${s}`;
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function resultCells(r) {
+  if (r.state !== 'done') return RESULT_COLS.map(() => '');
+  const x = r.result;
+  if (!x) return ['error', '出错', '', '', '', '', '', '', r.error || ''];
+  const bm = x.best_match || {};
+  return [x.status, label(x.status), x.data_source ? x.confidence : '', x.data_source || '', bm.formatted || '',
+    bm.lat ?? '', bm.lon ?? '', bm.source || '', (x.notes || []).join('; ')];
+}
+
+function exportCsv() {
+  const lines = [[...run.header, ...RESULT_COLS]];
+  for (const r of run.rows) lines.push([...run.header.map((_, i) => r.cells[i] ?? ''), ...resultCells(r)]);
+  const csv = '﻿' + lines.map((l) => l.map(csvCell).join(',')).join('\r\n') + '\r\n';  // BOM so Excel reads UTF-8
+  const d = new Date(), two = (n) => String(n).padStart(2, '0');
+  const name = run.name ? `${run.name.replace(/\.[^.]*$/, '')}_verified.csv`
+    : `addresses_verified_${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}_${two(d.getHours())}${two(d.getMinutes())}.csv`;
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  const a = Object.assign(document.createElement('a'), { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// ------------------------------------------------------------------ events
+
+form.addEventListener('submit', (e) => {
+  e.preventDefault();
+  if (active) stop();
+  else if (run && !dirty && run.rows.some((r) => r.state === 'pending')) pump();
+  else startRun();
+});
+text.addEventListener('input', changed);
+text.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); form.requestSubmit(); }
+});
+pick.addEventListener('change', () => { loadFile(pick.files[0]); pick.value = ''; });
+
+box.addEventListener('dragover', (e) => {
+  if (!e.dataTransfer.types.includes('Files')) return;
+  e.preventDefault();
+  box.classList.add('drop');
+});
+box.addEventListener('dragleave', () => box.classList.remove('drop'));
+box.addEventListener('drop', (e) => {
+  box.classList.remove('drop');
+  if (!e.dataTransfer.files.length) return;
+  e.preventDefault();
+  loadFile(e.dataTransfer.files[0]);
+});
+
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('[data-upload], [data-sample], [data-reset], [data-unload], [data-filter], [data-retry], [data-export]');
+  if (!t) return;
+  if (t.hasAttribute('data-upload')) pick.click();
+  else if (t.hasAttribute('data-sample')) { file = null; text.value = SAMPLE; changed(); }
+  else if (t.hasAttribute('data-reset')) { file = null; text.value = ''; changed(); text.focus(); }
+  else if (t.hasAttribute('data-unload')) { file = null; changed(); text.focus(); }
+  else if (t.dataset.filter) { filter = t.dataset.filter; userMoved = false; render(); }
+  else if (t.hasAttribute('data-retry')) retryFailed();
+  else if (t.hasAttribute('data-export')) exportCsv();
+});
+
+window.addEventListener('beforeunload', (e) => { if (active) e.preventDefault(); });
+
+// ------------------------------------------------------------------ init
+
+refresh();
+render();
+showHealth($('#health'));
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);  // marker colours follow the scheme
+</script>
+</body>
+</html>
