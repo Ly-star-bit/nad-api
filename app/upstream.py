@@ -39,6 +39,21 @@ class UpstreamError(Exception):
         self.message = message
 
 
+def _describe(exc: BaseException | None) -> str:
+    """Name a transport failure. httpx's async ConnectError is empty when the peer resets the connection during
+    the TLS handshake (typical of a firewall in the path), so add the innermost exception, which has the OS error."""
+    if exc is None:
+        return "unknown error"
+    root = exc
+    for _ in range(10):
+        nxt = root.__cause__ or root.__context__
+        if nxt is None:
+            break
+        root = nxt
+    text = str(exc) or type(exc).__name__
+    return text if root is exc or str(root) in text else f"{text} ({type(root).__name__}: {root})"
+
+
 class TTLCache:
     def __init__(self, ttl_s: int, max_entries: int):
         self.ttl_s, self.max_entries = ttl_s, max_entries
@@ -111,7 +126,7 @@ class Upstream:
                 raise UpstreamError(service, f"ArcGIS error {err.get('code')}: {detail}")
             self.cache.set(key, data)
             return data
-        raise UpstreamError(service, f"connection failed: {last_exc}")
+        raise UpstreamError(service, f"connection failed: {_describe(last_exc)}")
 
     # ------------------------------------------------------------------ Census geocoder
 

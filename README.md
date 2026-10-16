@@ -173,7 +173,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 ## 测试
 
 ```bash
-.venv/bin/python -m pytest -q tests                      # 离线：解析/归一化/Overture 映射与判定、网页路由（42 个）
+.venv/bin/python -m pytest -q tests                      # 离线：解析/归一化/Overture 映射与判定、网页路由、上游报错（43 个）
 .venv/bin/python scripts/smoke_test.py http://127.0.0.1:8000   # 在线：17 个真实地址端到端（含 Overture 兜底）
 ```
 
