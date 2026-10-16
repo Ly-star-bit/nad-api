@@ -112,6 +112,7 @@ class OvertureClient:
                 con.execute("SET GLOBAL enable_http_metadata_cache = true")
                 con.execute("SET GLOBAL enable_object_cache = true")
                 con.execute(f"SET GLOBAL memory_limit = '{config.OVERTURE_MEMORY_LIMIT}'")
+                con.execute(f"SET GLOBAL threads = {max(1, config.OVERTURE_THREADS)}")
                 self._con = con
             return self._con
 
@@ -154,7 +155,8 @@ class OvertureClient:
 
     # ------------------------------------------------------------------ queries
 
-    async def query(self, bbox: dict, number: int | None = None, limit: int = 5000) -> list[dict]:
+    async def query(self, bbox: dict, number: int | None = None, limit: int = 5000,
+                    timeout: float | None = None) -> list[dict]:
         """Address points inside bbox (lon/lat degrees), optionally only those whose number starts
         with `number` (exact int/suffix matching happens in the matcher)."""
         for attempt in range(2):
@@ -166,7 +168,7 @@ class OvertureClient:
             # the same box being read already (duplicate rows in a batch): share that DuckDB query
             task = self._inflight.get(key)
             if task is None:
-                task = asyncio.create_task(self._run(release, bbox, number, limit))
+                task = asyncio.create_task(self._run(release, bbox, number, limit, timeout or config.OVERTURE_TIMEOUT_S))
                 self._inflight[key] = task
                 task.add_done_callback(lambda t, k=key: (self._inflight.pop(k, None), t.cancelled() or t.exception()))
             try:
@@ -184,7 +186,7 @@ class OvertureClient:
             return recs
         raise UpstreamError("overture", "release unavailable")
 
-    async def _run(self, release: str, bbox: dict, number: int | None, limit: int) -> list[dict]:
+    async def _run(self, release: str, bbox: dict, number: int | None, limit: int, timeout: float) -> list[dict]:
         if not _RELEASE_RE.match(release):
             raise UpstreamError("overture", f"invalid release '{release}'")
         src = f"s3://{config.OVERTURE_BUCKET}/release/{release}/theme=addresses/type=address/*.parquet"
@@ -215,10 +217,10 @@ class OvertureClient:
 
             fut = asyncio.ensure_future(asyncio.to_thread(work))
             try:
-                return await asyncio.wait_for(asyncio.shield(fut), timeout=config.OVERTURE_TIMEOUT_S)
+                return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
             except asyncio.TimeoutError:
                 cur.interrupt()  # wait_for alone would leave the DuckDB thread running
-                raise UpstreamError("overture", f"query timed out after {config.OVERTURE_TIMEOUT_S:.0f}s") from None
+                raise UpstreamError("overture", f"query timed out after {timeout:.0f}s") from None
             except duckdb.Error as exc:
                 raise UpstreamError("overture", str(exc).splitlines()[0][:300]) from exc
             finally:
@@ -227,11 +229,17 @@ class OvertureClient:
                 else:  # interrupted after a timeout: close once the thread finishes, and consume its error
                     fut.add_done_callback(lambda f: (cur.close(), f.cancelled() or f.exception()))
 
-    async def warmup(self) -> None:
-        """Prime DuckDB's Parquet metadata cache so the first real fallback isn't the slow one."""
-        try:
-            t = time.perf_counter()
-            await self.query({"xmin": -112.10, "ymin": 33.44, "xmax": -112.09, "ymax": 33.45}, number=1, limit=1)
-            log.info("overture warm-up done in %.1fs (release %s)", time.perf_counter() - t, self._release)
-        except Exception as exc:  # never block startup on the fallback
-            log.warning("overture warm-up failed: %s", exc)
+    async def warmup(self, retry_after_s: tuple[float, ...] = (60.0, 300.0)) -> None:
+        """Prime DuckDB's Parquet metadata cache so the first real fallback isn't the slow one. It runs in the
+        background with its own, longer timeout (a server far from us-west-2 can need minutes for the ~43 MB of
+        metadata) and is retried; any success also clears a failure shown by /health."""
+        for attempt, delay in enumerate((0.0, *retry_after_s)):
+            await asyncio.sleep(delay)
+            try:
+                t = time.perf_counter()
+                await self.query({"xmin": -112.10, "ymin": 33.44, "xmax": -112.09, "ymax": 33.45}, number=1, limit=1,
+                                 timeout=config.OVERTURE_WARMUP_TIMEOUT_S)
+                log.info("overture warm-up done in %.1fs (release %s)", time.perf_counter() - t, self._release)
+                return
+            except Exception as exc:  # never block startup on the fallback
+                log.warning("overture warm-up failed (attempt %d): %s", attempt + 1, exc)

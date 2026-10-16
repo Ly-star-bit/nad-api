@@ -56,6 +56,12 @@ OVERTURE_SEARCH_RADIUS_M = _env_int("OVERTURE_SEARCH_RADIUS_M", 1500)
 OVERTURE_TIMEOUT_S = _env_float("OVERTURE_TIMEOUT_S", 30.0)
 OVERTURE_MAX_CONCURRENCY = _env_int("OVERTURE_MAX_CONCURRENCY", 4)
 OVERTURE_MEMORY_LIMIT = os.getenv("OVERTURE_MEMORY_LIMIT", "1GB")
+# DuckDB threads. Each one makes one HTTP request at a time and mostly waits on the network, so more threads than
+# cores pays off: the first query reads ~43 MB of Parquet metadata from 64 files (cold: 2.3 s at 32 threads,
+# 9-26 s at 1-2 threads, measured from the US; slower again from Asia).
+OVERTURE_THREADS = _env_int("OVERTURE_THREADS", 16)
+# The start-up warm-up runs in the background, so it can wait much longer than a user's query.
+OVERTURE_WARMUP_TIMEOUT_S = _env_float("OVERTURE_WARMUP_TIMEOUT_S", 180.0)
 
 # --- Behaviour ---------------------------------------------------------------------
 

@@ -61,7 +61,9 @@ OpenAddresses 里各县/市的原始数据，正好补上这些空白。实测�
   采用时 `confidence × 0.9`，`data_source="overture"`，`nad_status` 保留 NAD 原结论，`fallback` 字段说明过程。
 - 每条 Overture 记录带 `source`（如 `overture:us/ca/santa_clara`、`overture:NAD`）和 `license`（底层数据集许可证，
   对外展示时按 [Overture 署名要求](https://docs.overturemaps.org/attribution) 处理）。
-- 延迟：首次查询约 3.5 s（DuckDB 缓存 64 个 Parquet 文件的元数据，服务启动时会后台预热），之后 0.6–2 s。
+- 延迟：第一次查询要读 64 个 Parquet 文件的元数据（约 43 MB），服务启动时会在后台预热（单独的 180 s 超时，失败会在
+  1 分钟、5 分钟后重试）；预热完成后每次 0.3–2 s。离 us-west-2 远、CPU 少的服务器上预热更慢，
+  DuckDB 默认开 16 个线程并行下载（`OVERTURE_THREADS`）。
 - 没有位置就无法兜底：纯 `geocode_failed`（无 ZIP）不会查 Overture —— 无 bbox 的属性查询要扫 27 GB。
   带 `zip_fallback=true` 时用 ZIP 范围作为 bbox。
 
@@ -194,6 +196,8 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 | `OVERTURE_TIMEOUT_S` | 30 | 单次 DuckDB 查询超时（超时会中断查询） |
 | `OVERTURE_MAX_CONCURRENCY` | 4 | 同时进行的 Overture 查询数 |
 | `OVERTURE_MEMORY_LIMIT` | 1GB | DuckDB 内存上限 |
+| `OVERTURE_THREADS` | 16 | DuckDB 线程数。读 S3 时线程主要在等网络，比 CPU 核数多更快（冷启动实测：32 线程 2.3 s，1–2 线程 9–26 s） |
+| `OVERTURE_WARMUP_TIMEOUT_S` | 180 | 启动预热查询的超时（后台进行，不影响用户请求；用户请求仍用 `OVERTURE_TIMEOUT_S`） |
 
 缓存、限流和 DuckDB 连接都是进程内的：多 worker 时各自独立（每个 worker 各自预热 Overture、各占最多
 `OVERTURE_MEMORY_LIMIT` 内存）；需要共享缓存/限流可换 Redis。
@@ -201,7 +205,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 ## 测试
 
 ```bash
-.venv/bin/python -m pytest -q tests                      # 离线：解析/归一化、判定流程、Overture 映射、网页路由、上游客户端（75 个）
+.venv/bin/python -m pytest -q tests                      # 离线：解析/归一化、判定流程、Overture 映射、网页路由、上游客户端（76 个）
 .venv/bin/python scripts/smoke_test.py http://127.0.0.1:8000   # 在线：17 个真实地址端到端（含 Overture 兜底）
 ```
 

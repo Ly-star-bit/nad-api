@@ -83,3 +83,23 @@ def test_user_directional_beats_census_correction():
     s = score_candidate(south, pa, keys, None, "90012")["match"]["street_score"]
     n = score_candidate(north, pa, keys, None, "90012")["match"]["street_score"]
     assert n == 1.0 and s < 0.8
+
+
+def test_warmup_uses_its_own_timeout_and_retries():
+    import asyncio
+
+    from app import config
+    from app.overture import OvertureClient
+    from app.upstream import UpstreamError
+
+    calls = []
+
+    class Client(OvertureClient):
+        async def query(self, bbox, number=None, limit=5000, timeout=None):
+            calls.append(timeout)
+            if len(calls) == 1:
+                raise UpstreamError("overture", "query timed out")
+            return []
+
+    asyncio.run(Client(http=None).warmup(retry_after_s=(0, 0)))
+    assert calls == [config.OVERTURE_WARMUP_TIMEOUT_S] * 2  # failed once, succeeded on the retry, then stopped
