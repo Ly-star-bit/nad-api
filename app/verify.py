@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import config
 from .address import ParsedAddress, StreetKey, clean, norm_text, norm_unit, street_score
-from .upstream import Upstream, UpstreamError
+from .upstream import Upstream, UpstreamError, UpstreamRejected
 
 if TYPE_CHECKING:
     from .overture import OvertureClient
@@ -152,12 +152,21 @@ def _street_matched(scored: list[dict]) -> bool:
     return any(c["match"]["street_score"] >= config.STREET_MATCH_THRESHOLD for c in scored)
 
 
-def build_suggestions(nearby: list[dict], pa: ParsedAddress, keys: list[StreetKey], origin, ref_zip: str,
-                      limit: int) -> list[dict]:
-    """Same-street address points nearest (by house number) to the requested one."""
+def same_street(nearby: list[dict], pa: ParsedAddress, keys: list[StreetKey], origin, ref_zip: str) -> list[dict]:
+    """Scored address points on the requested street."""
     scored = [score_candidate(r, pa, keys, origin, ref_zip) for r in nearby if r.get("address_number_int") is not None]
-    same = [c for c in scored if c["match"]["street_score"] >= config.STREET_MATCH_THRESHOLD]
-    same.sort(key=lambda c: (abs(c["address_number_int"] - pa.house.number), c["match"]["distance_m"] or 0))
+    return [c for c in scored if c["match"]["street_score"] >= config.STREET_MATCH_THRESHOLD]
+
+
+def brackets(same: list[dict], number: int) -> bool:
+    """True when this street has numbers on both sides of `number` among the points given."""
+    nums = [c["address_number_int"] for c in same]
+    return any(n < number for n in nums) and any(n > number for n in nums)
+
+
+def build_suggestions(same: list[dict], pa: ParsedAddress, limit: int) -> list[dict]:
+    """Same-street address points nearest (by house number) to the requested one."""
+    same = sorted(same, key=lambda c: (abs(c["address_number_int"] - pa.house.number), c["match"]["distance_m"] or 0))
     out, seen = [], set()
     for c in same:
         if c["formatted"] not in seen:
@@ -265,24 +274,52 @@ async def _nad_near_phase(up: Upstream, pa: ParsedAddress, geocode: dict, keys: 
     def uncovered(cov: dict | None) -> bool:
         return bool(cov) and cov.get("status_code") not in (10, 15)
 
-    t = time.perf_counter()
+    probe: dict[str, Any] | None = None  # every point within STREET_PROBE_RADIUS_M, fetched at most once
+
+    async def street_probe() -> dict[str, Any]:
+        """Is the street itself in the NAD here? Pull every point nearby and match streets locally."""
+        nonlocal probe
+        if probe is None:
+            tp = time.perf_counter()
+            try:
+                nearby, truncated = await up.nad_near(*origin, STREET_PROBE_RADIUS_M)
+                if truncated:
+                    notes.append(f"dense area: street probe hit the 2000-point limit within {STREET_PROBE_RADIUS_M} m, suggestions may be incomplete")
+            except UpstreamError as exc:
+                nearby = None
+                notes.append(f"street probe failed: {exc.message}")
+            timings["street_probe"] = round((time.perf_counter() - tp) * 1000, 1)
+            out["nad_points_nearby"] = len(nearby) if nearby is not None else None
+            probe = {"nearby": nearby, "same": same_street(nearby or [], pa, keys, origin, ref_zip)}
+        return probe
+
     coverage_task = asyncio.create_task(timed_coverage())
     scored: list[dict] = []
     nad_error: str | None = None
+    nad_ms = 0.0
     for i, radius in enumerate(config.SEARCH_RADII_M):
-        # County has no NAD data at all: don't spend seconds on wider searches.
-        if i > 0 and uncovered(await coverage_task):
-            break
+        if i > 0:
+            # County has no NAD data at all: don't spend seconds on wider searches.
+            if uncovered(await coverage_task):
+                break
+            # This street's own numbers on both sides of the requested one are within the radius already
+            # searched, so the number would sit between them, inside it: a wider search (seconds in a dense
+            # city) could only turn up the same number on another street.
+            if config.SEARCH_RADII_M[i - 1] >= STREET_PROBE_RADIUS_M and brackets((await street_probe())["same"], pa.house.number):
+                break
+        t = time.perf_counter()
         try:
             recs, _ = await up.nad_near(*origin, radius, where=where)
         except UpstreamError as exc:
             nad_error = exc.message
             break
+        finally:
+            nad_ms += time.perf_counter() - t
         out["search_radius_m"] = radius
         scored = _rank([score_candidate(r, pa, keys, origin, ref_zip) for r in recs])
         if _street_matched(scored):
             break
-    timings["nad"] = round((time.perf_counter() - t) * 1000, 1)
+    timings["nad"] = round(nad_ms * 1000, 1)
     out["coverage"] = await coverage_task
 
     if nad_error:
@@ -291,19 +328,9 @@ async def _nad_near_phase(up: Upstream, pa: ParsedAddress, geocode: dict, keys: 
     suggestions: list[dict] = []
     area_empty = False
     if not _street_matched(scored) and not uncovered(out["coverage"]):
-        # Is the street itself in the NAD here? Pull every point nearby and match streets locally.
-        t = time.perf_counter()
-        try:
-            nearby, truncated = await up.nad_near(*origin, STREET_PROBE_RADIUS_M)
-            if truncated:
-                notes.append(f"dense area: street probe hit the 2000-point limit within {STREET_PROBE_RADIUS_M} m, suggestions may be incomplete")
-        except UpstreamError as exc:
-            nearby = None
-            notes.append(f"street probe failed: {exc.message}")
-        timings["street_probe"] = round((time.perf_counter() - t) * 1000, 1)
-        out["nad_points_nearby"] = len(nearby) if nearby is not None else None
-        suggestions = build_suggestions(nearby or [], pa, keys, origin, ref_zip, max_candidates)
-        area_empty = nearby == []
+        p = await street_probe()
+        suggestions = build_suggestions(p["same"], pa, max_candidates)
+        area_empty = p["nearby"] == []
 
     return decide(pa, scored, suggestions, dataset="NAD", ref_zip=ref_zip, max_candidates=max_candidates,
                   coverage=out["coverage"], area_empty=area_empty, notes=notes)
@@ -313,19 +340,24 @@ async def _nad_near_phase(up: Upstream, pa: ParsedAddress, geocode: dict, keys: 
 
 
 async def _overture_phase(ov: "OvertureClient", pa: ParsedAddress, keys: list[StreetKey], ref_zip: str,
-                          origin: tuple[float, float] | None, extent: dict | None, max_candidates: int) -> tuple[Decision, str]:
+                          origin: tuple[float, float] | None, extent: dict | None, max_candidates: int,
+                          need_street: bool = True) -> tuple[Decision, str]:
+    """`need_street=False` skips the street probe: when NAD already found the street, the probe (a second DuckDB
+    read) could at best tie that verdict, and a tie keeps the NAD result anyway."""
     release = await ov.release()
     bbox = bbox_around(*origin, config.OVERTURE_SEARCH_RADIUS_M) if origin else extent
     recs = await ov.query(bbox, number=pa.house.number)
     scored = _rank([score_candidate(r, pa, keys, origin, ref_zip) for r in recs])
     suggestions: list[dict] = []
     area_empty = False
-    if not _street_matched(scored) and origin:
+    if not _street_matched(scored) and origin and need_street:
         nearby = await ov.query(bbox_around(*origin, STREET_PROBE_RADIUS_M))
-        suggestions = build_suggestions(nearby, pa, keys, origin, ref_zip, max_candidates)
+        suggestions = build_suggestions(same_street(nearby, pa, keys, origin, ref_zip), pa, max_candidates)
         area_empty = not nearby
+    empty_note = ("no matching Overture record in the ZIP area" if not origin
+                  else None if need_street else "this house number is not in Overture either")
     dec = decide(pa, scored, suggestions, dataset="Overture", ref_zip=ref_zip, max_candidates=max_candidates,
-                 area_empty=area_empty, empty_note=None if origin else "no matching Overture record in the ZIP area")
+                 area_empty=area_empty, empty_note=empty_note)
     return dec, release
 
 
@@ -391,21 +423,31 @@ async def verify_address(
 
     # ---- 1. geocode -------------------------------------------------------------------
     geocode: dict | None = None
+    geocode_error: str | None = None
     if lat is not None and lon is not None:
         geocode = {"source": "input", "lat": lat, "lon": lon}
     else:
         t = time.perf_counter()
         try:
-            if structured:
+            # Census' structured form refuses a city without state or ZIP; the one-line form takes it
+            if structured and (pa.state or pa.zip5):
                 street_line = " ".join(p for p in (pa.house.raw, pa.street_text) if p)
                 geocode = await up.census_geocode_structured(street_line, pa.city, pa.state, pa.zip5)
             else:
                 geocode = await up.census_geocode_oneline(pa.geocode_text)
+        except UpstreamRejected as exc:
+            notes.append(f"census geocoder rejected the address: {exc.message}")
         except UpstreamError as exc:
+            geocode_error = exc.message
             notes.append(f"census geocoder unavailable: {exc.message}")
         timings["geocode"] = round((time.perf_counter() - t) * 1000, 1)
         if geocode:
             geocode = {"source": "census", **geocode}
+            if geocode.get("alternatives"):
+                others = "; ".join(a["matched_address"] for a in geocode["alternatives"][:4])
+                notes.append(f"Census found {geocode['match_count']} addresses for this input and only the first "
+                             f"({geocode['matched_address']}) was checked; add the state or ZIP to pick one. "
+                             f"Others: {others}")
 
     census_key, user_key = census_street_key(geocode), StreetKey.from_text(pa.street_text)
     keys = [k for k in (census_key, user_key) if k]
@@ -428,6 +470,8 @@ async def verify_address(
         # Optional ZIP fallback when the address is not in TIGER. Without any location, neither
         # NAD nor Overture can be searched (an attribute-only scan would time out / read 27 GB).
         if not (zip_fallback and pa.zip5):
+            if geocode_error:  # the geocoder was unreachable: nothing is known about the address itself
+                return finish("upstream_error")
             if not pa.zip5:
                 notes.append("address could not be geocoded; add a ZIP code and set zip_fallback=true to search the ZIP area")
             else:
@@ -462,7 +506,9 @@ async def verify_address(
         out["fallback"] = info
         t = time.perf_counter()
         try:
-            ov_dec, info["release"] = await _overture_phase(overture, pa, keys, ref_zip, origin, extent, max_candidates)
+            ov_dec, info["release"] = await _overture_phase(
+                overture, pa, keys, ref_zip, origin, extent, max_candidates,
+                need_street=STATUS_RANK["street_only"] > STATUS_RANK[nad_dec.status])
         except UpstreamError as exc:
             info["error"] = exc.message
             notes.append(f"Overture fallback failed: {exc.message}")

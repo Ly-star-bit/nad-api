@@ -8,6 +8,7 @@ to one canonical token form before comparison.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
@@ -186,19 +187,47 @@ UNIT_DESIGNATORS = {
     "APT", "APARTMENT", "UNIT", "STE", "SUITE", "RM", "ROOM", "FL", "FLR", "FLOOR", "BLDG",
     "BUILDING", "LOT", "SPC", "SPACE", "TRLR", "TRAILER", "DEPT", "OFC", "OFFICE", "PH",
     "PENTHOUSE", "HNGR", "HANGAR", "PIER", "SLIP", "BSMT", "BASEMENT", "LOWR", "UPPR", "REAR",
-    "FRNT", "SIDE", "NO", "NUM", "NUMBER",
+    "FRNT", "SIDE", "NO", "NUM", "NUMBER", "PMB",
 }
 # Designators that may appear without an identifier ("REAR", "BSMT").
 _UNIT_STANDALONE = {"BSMT", "BASEMENT", "LOWR", "UPPR", "REAR", "FRNT", "SIDE", "PH", "PENTHOUSE"}
 
 _UNIT_RE = re.compile(
     r"(?:\b(APT|APARTMENT|UNIT|STE|SUITE|RM|ROOM|FL|FLR|FLOOR|BLDG|BUILDING|LOT|SPC|SPACE|TRLR|"
-    r"TRAILER|DEPT|OFC|OFFICE|PH|PENTHOUSE|HNGR|HANGAR|PIER|SLIP)\b\.?\s*#?|#)\s*"
+    r"TRAILER|DEPT|OFC|OFFICE|PH|PENTHOUSE|HNGR|HANGAR|PIER|SLIP|PMB)\b\.?\s*#?|#)\s*"
     r"([A-Z0-9][A-Z0-9\-/]*)",
     re.I,
 )
-_STATE_ZIP_TAIL_RE = re.compile(r"\b([A-Z]{2})\s+(\d{5})(?:-?(\d{4}))?\s*$", re.I)
+_PO_BOX_RE = re.compile(r"^\s*(?:P\s*O|POST\s+OFFICE)?\s*BOX\s+\d", re.I)
+
+STATE_NAMES = {
+    "ALABAMA": "AL", "ALASKA": "AK", "ARIZONA": "AZ", "ARKANSAS": "AR", "CALIFORNIA": "CA", "COLORADO": "CO",
+    "CONNECTICUT": "CT", "DELAWARE": "DE", "DISTRICT OF COLUMBIA": "DC", "FLORIDA": "FL", "GEORGIA": "GA",
+    "HAWAII": "HI", "IDAHO": "ID", "ILLINOIS": "IL", "INDIANA": "IN", "IOWA": "IA", "KANSAS": "KS",
+    "KENTUCKY": "KY", "LOUISIANA": "LA", "MAINE": "ME", "MARYLAND": "MD", "MASSACHUSETTS": "MA",
+    "MICHIGAN": "MI", "MINNESOTA": "MN", "MISSISSIPPI": "MS", "MISSOURI": "MO", "MONTANA": "MT",
+    "NEBRASKA": "NE", "NEVADA": "NV", "NEW HAMPSHIRE": "NH", "NEW JERSEY": "NJ", "NEW MEXICO": "NM",
+    "NEW YORK": "NY", "NORTH CAROLINA": "NC", "NORTH DAKOTA": "ND", "OHIO": "OH", "OKLAHOMA": "OK",
+    "OREGON": "OR", "PENNSYLVANIA": "PA", "RHODE ISLAND": "RI", "SOUTH CAROLINA": "SC", "SOUTH DAKOTA": "SD",
+    "TENNESSEE": "TN", "TEXAS": "TX", "UTAH": "UT", "VERMONT": "VT", "VIRGINIA": "VA", "WASHINGTON": "WA",
+    "WEST VIRGINIA": "WV", "WISCONSIN": "WI", "WYOMING": "WY", "PUERTO RICO": "PR", "GUAM": "GU",
+    "VIRGIN ISLANDS": "VI", "US VIRGIN ISLANDS": "VI", "AMERICAN SAMOA": "AS", "NORTHERN MARIANA ISLANDS": "MP",
+}
+# "MA 02108" or "Massachusetts 02108"; 3-4 digit ZIPs are ones a spreadsheet stripped the leading zeros from.
+_STATE_ZIP_TAIL_RE = re.compile(
+    r"\b([A-Z]{2}|" + "|".join(sorted((n.replace(" ", r"\s+") for n in STATE_NAMES), key=len, reverse=True))
+    + r")\s+(\d{3,5})(?:-?(\d{4}))?\s*$",
+    re.I,
+)
 _ZIP_RE = re.compile(r"\b(\d{5})(?:-?(\d{4}))?\s*$")
+# First three digits of the ZIPs that start with 0, by state: a ZIP missing its zeros is only padded when the
+# result belongs to the state given, so "AZ 8500" (a typo) is never turned into some New England ZIP.
+_ZERO_ZIP3 = {
+    "NY": {"005"}, "PR": {"006", "007", "009"}, "VI": {"008"}, "MA": {f"{n:03d}" for n in range(10, 28)} | {"055"},
+    "RI": {"028", "029"}, "NH": {f"{n:03d}" for n in range(30, 39)}, "ME": {f"{n:03d}" for n in range(39, 50)},
+    "VT": {f"{n:03d}" for n in range(50, 60)} - {"055"}, "CT": {f"{n:03d}" for n in range(60, 70)},
+    "NJ": {f"{n:03d}" for n in range(70, 90)},
+}
 # Letter suffixes must be attached ("12A"); "1700 W Washington" is a directional, not a suffix.
 _HOUSE_NUMBER_RE = re.compile(
     r"^\s*(?P<pre>[A-Z]{1,2}(?=\d))?(?P<num>\d+)(?:-(?P<num2>\d+))?"
@@ -211,6 +240,33 @@ _STATES = {
     "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT",
     "VT", "VA", "WA", "WV", "WI", "WY", "PR", "VI", "GU", "AS", "MP",
 }
+
+
+def prep(text: str | None) -> str:
+    """Input as typed -> plain ASCII-ish text: full-width commas, digits and spaces from a Chinese IME become
+    ',', '0-9' and ' ' (NFKC), and whitespace is collapsed."""
+    text = (text or "").replace("½", " 1/2").replace("、", ",")  # NFKC alone would turn "100½" into "1001⁄2"
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text).replace("⁄", "/")).strip()
+
+
+def state_abbr(text: str | None) -> str:
+    """'az' / 'Arizona' -> 'AZ'; '' when it is not a US state or territory."""
+    t = clean(text)
+    return t if t in _STATES else STATE_NAMES.get(t, "")
+
+
+def fix_zip(text: str | None, state: str = "") -> tuple[str, str, str | None]:
+    """-> (zip5, zip4, warning). Restores the leading zeros a spreadsheet drops ('2108' in MA -> '02108')."""
+    m = re.match(r"^\s*(\d{3,5})(?:-?(\d{4}))?\s*$", text or "")
+    if not m:
+        return "", "", None
+    zip5, zip4 = m.group(1), m.group(2) or ""
+    if len(zip5) == 5:
+        return zip5, zip4, None
+    padded = zip5.zfill(5)
+    if padded[:3] in _ZERO_ZIP3.get(state, ()):
+        return padded, zip4, f"ZIP '{zip5}' is missing its leading zero (spreadsheets drop it); used {padded}"
+    return "", "", None
 
 
 def clean(text: str | None) -> str:
@@ -241,9 +297,9 @@ def norm_text(text: str | None, types: bool = True) -> str:
 
 
 def norm_unit(text: str | None) -> str:
-    """'Apt. #4-B' -> '4B'; 'Unit 12' -> '12'."""
+    """'Apt. #4-B' -> '4B'; 'Unit 12' -> '12'; 'Unit 0012' -> '12'."""
     toks = [t for t in clean(text).replace("/", " ").split() if t not in UNIT_DESIGNATORS]
-    return re.sub(r"[^A-Z0-9]", "", "".join(toks))
+    return re.sub(r"^0+(?=\d)", "", re.sub(r"[^A-Z0-9]", "", "".join(toks)))
 
 
 @dataclass
@@ -290,12 +346,17 @@ def street_score(query: StreetKey, cand: StreetKey) -> float:
     q_flat, c_flat = query.full.replace(" ", ""), cand.full.replace(" ", "")
     flat = SequenceMatcher(None, q_flat, c_flat).ratio()
     score = max(full, flat, core * 0.95)
+    # Numbered streets are different streets: "5 AVE" vs "3 AVE" is 0.8 as text, "US HWY 101" vs "10" 0.95.
+    q_nums, c_nums = re.findall(r"\b\d+\b", query.full), re.findall(r"\b\d+\b", cand.full)
+    if q_nums and c_nums and q_nums != c_nums:
+        score = min(score, 0.5)
     if query.predir and cand.predir and query.predir != cand.predir:
         score -= 0.25
     if query.postdir and cand.postdir and query.postdir != cand.postdir:
         score -= 0.25
+    # Same name, other type is another street too: in grid cities NW 5th St and NW 5th Ave cross each other.
     if query.posttype and cand.posttype and query.posttype != cand.posttype:
-        score -= 0.1
+        score -= 0.25
     return round(max(0.0, min(1.0, score)), 3)
 
 
@@ -338,18 +399,53 @@ def parse_house_number(street_line: str) -> tuple[HouseNumber | None, str]:
     return house, street_line[m.end():].strip(" ,")
 
 
+def _unit_matches(street_line: str) -> list[re.Match]:
+    """Designator + identifier runs that really are units. Several words double as street names, so a run is
+    skipped when its 'identifier' is a street type ("100 Pier Ave", "2100 Space Park Dr") or when no street
+    word comes before it ("Pier 39")."""
+    house = _HOUSE_NUMBER_RE.match(street_line)
+    start = house.end() if house else 0
+    out = []
+    for m in _UNIT_RE.finditer(street_line):
+        ident = m.group(2).upper()
+        if ident in SUFFIXES and not any(ch.isdigit() for ch in ident):
+            continue
+        if m.start() < start or not re.search(r"[A-Z]", street_line[start:m.start()], re.I):
+            continue
+        out.append(m)
+    return out
+
+
 def extract_unit(street_line: str) -> tuple[str, str, str]:
-    """Returns (street_line_without_unit, unit_identifier, unit_as_written)."""
-    matches = list(_UNIT_RE.finditer(street_line))
+    """Returns (street_line_without_unit, unit_identifier, unit_as_written). Every designator run is removed
+    from the street ("Main St Bldg 2 Apt 5" -> "Main St"); the last one is the unit."""
+    matches = _unit_matches(street_line)
     if matches:
-        m = matches[-1]  # last occurrence wins ("...St Bldg 2 Apt 5")
-        unit_raw = m.group(0).strip()
-        rest = (street_line[: m.start()] + " " + street_line[m.end():]).strip(" ,")
-        return re.sub(r"\s+", " ", rest), norm_unit(m.group(2)), unit_raw
+        rest, pos = [], 0
+        for m in matches:
+            rest.append(street_line[pos:m.start()])
+            pos = m.end()
+        rest.append(street_line[pos:])
+        unit_raw = " ".join(m.group(0).strip() for m in matches)
+        return re.sub(r"\s+", " ", " ".join(rest)).strip(" ,"), norm_unit(matches[-1].group(2)), unit_raw
     toks = street_line.split()
     if toks and toks[-1].upper() in _UNIT_STANDALONE:
         return " ".join(toks[:-1]), toks[-1].upper(), toks[-1]
     return street_line, "", ""
+
+
+def _state_zip_tail(text: str) -> tuple[str, str, str, str | None, int] | None:
+    """'... AZ 85007' / '... Arizona 85007-1234' / '... MA 2108' -> (state, zip5, zip4, warning, start)."""
+    m = _STATE_ZIP_TAIL_RE.search(text)
+    if not m:
+        return None
+    state = state_abbr(m.group(1))
+    if not state:
+        return None
+    zip5, zip4, warning = fix_zip(m.group(2) + (f"-{m.group(3)}" if m.group(3) else ""), state)
+    if not zip5:  # "AZ 8500": keep the state, drop the typo'd ZIP
+        warning = f"unrecognized ZIP code '{m.group(2)}'"
+    return state, zip5, zip4, warning, m.start()
 
 
 def _split_trailing_city(street_line: str) -> tuple[str, str]:
@@ -363,7 +459,7 @@ def _split_trailing_city(street_line: str) -> tuple[str, str]:
 
 def parse_oneline(text: str) -> ParsedAddress:
     """Best-effort split of '1700 W Washington St Apt 2, Phoenix, AZ 85007'."""
-    raw = re.sub(r"\s+", " ", text or "").strip()
+    raw = prep(text)
     pa = ParsedAddress(raw=raw)
     if not raw:
         return pa
@@ -372,23 +468,25 @@ def parse_oneline(text: str) -> ParsedAddress:
 
     if not tail:
         # No commas: peel "ST 12345" off the end first so "FL 33101" is never read as a floor.
-        m = _STATE_ZIP_TAIL_RE.search(street_line)
-        if m and m.group(1).upper() in _STATES:
-            pa.state, pa.zip5, pa.zip4 = m.group(1).upper(), m.group(2), m.group(3) or ""
-            street_line = street_line[: m.start()].strip()
+        st = _state_zip_tail(street_line)
+        if st:
+            pa.state, pa.zip5, pa.zip4, warning, start = st
+            pa.warnings += [warning] if warning else []
+            street_line = street_line[:start].strip()
     else:
         last = tail[-1]
-        m = _STATE_ZIP_TAIL_RE.search(last)
-        if m and m.group(1).upper() in _STATES:
-            pa.state, pa.zip5, pa.zip4 = m.group(1).upper(), m.group(2), m.group(3) or ""
-            tail[-1] = last[: m.start()].strip()
+        st = _state_zip_tail(last)
+        if st:
+            pa.state, pa.zip5, pa.zip4, warning, start = st
+            pa.warnings += [warning] if warning else []
+            tail[-1] = last[:start].strip()
         else:
             mz = _ZIP_RE.search(last)
             if mz:
                 pa.zip5, pa.zip4 = mz.group(1), mz.group(2) or ""
                 tail[-1] = last[: mz.start()].strip()
-            if tail[-1].upper() in _STATES:
-                pa.state = tail[-1].upper()
+            if state_abbr(tail[-1]):
+                pa.state = state_abbr(tail[-1])
                 tail[-1] = ""
         tail = [t for t in tail if t]
         # A unit written as its own segment: "123 Main St, Apt 4, Springfield, IL"
@@ -402,28 +500,35 @@ def parse_oneline(text: str) -> ParsedAddress:
         street_line, pa.city = _split_trailing_city(street_line)
     pa.house, pa.street_text = parse_house_number(street_line)
     if pa.house is None:
-        pa.warnings.append("no house number found in input")
+        pa.warnings.append(_no_number_warning(street_line))
 
     pa.geocode_text = ", ".join(p for p in (street_line, pa.city, f"{pa.state} {pa.zip5}".strip()) if p)
     return pa
 
 
+def _no_number_warning(street_line: str) -> str:
+    if _PO_BOX_RE.match(clean(street_line)):
+        return "PO Box is a USPS mailbox, not a street address; NAD and Overture only hold physical address points"
+    return "no house number found in input"
+
+
 def parse_structured(street: str, city: str = "", state: str = "", zip_code: str = "",
                      unit: str = "") -> ParsedAddress:
-    street_line, unit_id, unit_raw = extract_unit(re.sub(r"\s+", " ", street or "").strip())
+    street, city, state, zip_code, unit = (prep(v) for v in (street, city, state, zip_code, unit))
+    street_line, unit_id, unit_raw = extract_unit(street)
     if unit:
         unit_id, unit_raw = norm_unit(unit), unit
     pa = ParsedAddress(
-        raw=", ".join(p for p in (street, unit, city, f"{state or ''} {zip_code or ''}".strip()) if p),
-        unit=unit_id, unit_raw=unit_raw, city=(city or "").strip(), state=(state or "").strip().upper(),
+        raw=", ".join(p for p in (street, unit, city, f"{state} {zip_code}".strip()) if p),
+        unit=unit_id, unit_raw=unit_raw, city=city, state=state_abbr(state) or state.upper(),
     )
-    mz = re.match(r"^\s*(\d{5})(?:-?(\d{4}))?\s*$", zip_code or "")
-    if mz:
-        pa.zip5, pa.zip4 = mz.group(1), mz.group(2) or ""
-    elif zip_code:
+    pa.zip5, pa.zip4, warning = fix_zip(zip_code, pa.state)
+    if warning:
+        pa.warnings.append(warning)
+    elif zip_code and not pa.zip5:
         pa.warnings.append(f"unrecognized ZIP code '{zip_code}'")
     pa.house, pa.street_text = parse_house_number(street_line)
     if pa.house is None:
-        pa.warnings.append("no house number found in input")
+        pa.warnings.append(_no_number_warning(street_line))
     pa.geocode_text = ", ".join(p for p in (street_line, pa.city, f"{pa.state} {pa.zip5}".strip()) if p)
     return pa

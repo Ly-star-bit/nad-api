@@ -10,11 +10,12 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import config
-from .address import norm_unit, parse_oneline, parse_structured
+from .address import fix_zip, norm_unit, parse_oneline, parse_structured, prep, state_abbr
 from .models import (
     BatchItem, BatchRequest, BatchResponse, CoverageResponse, NearResponse, OvertureNearResponse, VerifyRequest,
     VerifyResponse,
@@ -51,8 +52,6 @@ app = FastAPI(
     ),
     lifespan=lifespan,
 )
-app.add_middleware(CORSMiddleware, allow_origins=config.CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
-
 _hits: dict[str, deque[float]] = defaultdict(deque)
 
 
@@ -81,6 +80,11 @@ async def guard(request: Request, call_next):
     return await call_next(request)
 
 
+# Added last = outermost: compression covers every response, and CORS headers reach the 401 / 429 from guard too.
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=6)  # a batch of 10 results: 48 KB -> 6 KB
+app.add_middleware(CORSMiddleware, allow_origins=config.CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
+
+
 @app.exception_handler(UpstreamError)
 async def upstream_error_handler(_: Request, exc: UpstreamError):
     return JSONResponse({"detail": f"upstream service error ({exc.service}): {exc.message}"}, status_code=502)
@@ -90,12 +94,14 @@ async def _run_verify(req: VerifyRequest) -> dict:
     if req.address and not req.street:
         pa = parse_oneline(req.address)
         if req.unit:
-            pa.unit, pa.unit_raw = norm_unit(req.unit), req.unit
-        for attr in ("city", "state"):
-            if getattr(req, attr) and not getattr(pa, attr):
-                setattr(pa, attr, getattr(req, attr).strip() if attr == "city" else getattr(req, attr).strip().upper())
+            pa.unit, pa.unit_raw = norm_unit(req.unit), prep(req.unit)
+        if req.city and not pa.city:
+            pa.city = prep(req.city)
+        if req.state and not pa.state:
+            pa.state = state_abbr(req.state) or prep(req.state).upper()
         if req.zip and not pa.zip5:
-            pa.zip5 = req.zip.strip()[:5]
+            pa.zip5, pa.zip4, warning = fix_zip(prep(req.zip), pa.state)
+            pa.warnings += [warning] if warning else []
         structured = False
     else:
         pa = parse_structured(req.street or "", req.city or "", req.state or "", req.zip or "", req.unit or "")
@@ -113,11 +119,13 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 
 class _Assets(StaticFiles):
-    """Web page assets, always revalidated (a cheap 304 via ETag) so a redeploy is never served stale."""
+    """Web page assets, always revalidated (a cheap 304 via ETag) so a redeploy is never served stale. Vendored
+    libraries only change on a deliberate upgrade, so the browser keeps them for a day without asking."""
 
-    def file_response(self, *args, **kwargs):
-        response = super().file_response(*args, **kwargs)
-        response.headers["Cache-Control"] = "no-cache"
+    def file_response(self, full_path, *args, **kwargs):
+        response = super().file_response(full_path, *args, **kwargs)
+        vendor = (STATIC_DIR / "vendor") in Path(full_path).parents
+        response.headers["Cache-Control"] = "public, max-age=86400" if vendor else "no-cache"
         return response
 
 
@@ -145,7 +153,9 @@ async def batch_page():
 
 
 @app.get("/health", tags=["meta"])
-async def health(deep: bool = Query(False, description="Also ping the NAD layer (returns total point count)")):
+async def health(deep: bool = Query(False, description="Call every upstream now (uncached) instead of only "
+                                                       "reporting how each one's latest call went")):
+    """`upstreams` has the outcome of each upstream's latest real call; `status` is `degraded` when any failed."""
     up: Upstream = app.state.upstream
     ov: OvertureClient | None = app.state.overture
     body: dict = {
@@ -153,18 +163,26 @@ async def health(deep: bool = Query(False, description="Also ping the NAD layer 
         "overture": {"enabled": ov is not None, "release": ov._release if ov else None},
     }
     if deep:
-        t = time.perf_counter()
-        try:
-            body["nad_point_count"] = await up.nad_count()
-            body["nad_latency_ms"] = round((time.perf_counter() - t) * 1000, 1)
-        except UpstreamError as exc:
-            body.update(status="degraded", nad_error=exc.message)
-        if ov is not None:
+        async def count() -> None:
+            t = time.perf_counter()
+            try:
+                body["nad_point_count"] = await up.nad_count()
+                body["nad_latency_ms"] = round((time.perf_counter() - t) * 1000, 1)
+            except UpstreamError as exc:
+                body["nad_error"] = exc.message
+
+        async def release() -> None:
             try:
                 body["overture"]["release"] = await ov.release()
             except UpstreamError as exc:
-                body.update(status="degraded")
                 body["overture"]["error"] = exc.message
+
+        await asyncio.gather(count(), up.ping(), *([release()] if ov else []))
+    now = time.time()
+    seen = {**up.status, **({"overture": ov.status} if ov and ov.status else {})}
+    body["upstreams"] = {s: {"ok": v["ok"], "error": v["error"], "ago_s": round(now - v["at"])} for s, v in seen.items()}
+    if not all(v["ok"] for v in seen.values()) or "error" in body["overture"]:
+        body["status"] = "degraded"
     return body
 
 
@@ -174,7 +192,7 @@ async def verify_get(
     street: str | None = Query(None, description="Street line (structured mode)"),
     unit: str | None = Query(None),
     city: str | None = Query(None),
-    state: str | None = Query(None, max_length=2),
+    state: str | None = Query(None, description="Abbreviation or full name"),
     zip: str | None = Query(None, alias="zip"),
     lat: float | None = Query(None, ge=-90, le=90),
     lon: float | None = Query(None, ge=-180, le=180),
@@ -197,7 +215,9 @@ async def verify_post(req: VerifyRequest):
 
 
 @app.post("/v1/verify/batch", response_model=BatchResponse, tags=["verify"], summary="Verify many addresses")
-async def verify_batch(body: BatchRequest):
+async def verify_batch(body: BatchRequest, stream: bool = Query(
+        False, description="Stream one BatchItem per line (application/x-ndjson) as each address finishes, "
+                           "instead of one JSON document once all are done")):
     if len(body.addresses) > config.MAX_BATCH_SIZE:
         raise HTTPException(413, f"at most {config.MAX_BATCH_SIZE} addresses per batch")
     sem = asyncio.Semaphore(config.BATCH_CONCURRENCY)
@@ -208,6 +228,19 @@ async def verify_batch(body: BatchRequest):
                 return BatchItem(index=i, result=await _run_verify(req))
             except Exception as exc:  # one bad row must not fail the batch
                 return BatchItem(index=i, error=str(exc))
+
+    if stream:
+        async def lines():
+            tasks = [asyncio.create_task(one(i, r)) for i, r in enumerate(body.addresses)]
+            try:
+                for done in asyncio.as_completed(tasks):
+                    yield (await done).model_dump_json() + "\n"
+            finally:  # client went away: stop the rest
+                for t in tasks:
+                    t.cancel()
+
+        # X-Accel-Buffering: nginx would otherwise hold the lines back until the whole batch is done
+        return StreamingResponse(lines(), media_type="application/x-ndjson", headers={"X-Accel-Buffering": "no"})
 
     items = await asyncio.gather(*(one(i, r) for i, r in enumerate(body.addresses)))
     summary = Counter(it.result.status if it.result else "error" for it in items)

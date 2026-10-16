@@ -69,7 +69,7 @@
 .rows .c-st { width: 7.5em; white-space: nowrap; font-weight: 600; }
 .rows .c-st .sq { margin-right: 8px; vertical-align: 1px; }
 .rows .c-m { font: 12.5px/1.6 var(--mono); text-transform: uppercase; overflow-wrap: anywhere; }
-.rows .c-m .na, .rows .c-m .e { font-family: var(--sans); text-transform: none; }
+.rows .c-m .na, .rows .c-m .e, .rows .c-m .w { font-family: var(--sans); text-transform: none; }
 .rows .c-src { width: 5.5em; white-space: nowrap; color: var(--ink-2); }
 .rows .c-conf { width: 4.5em; text-align: right; white-space: nowrap; color: var(--ink-2); }
 .rows .c-go { width: 2.5em; text-align: right; white-space: nowrap; padding-right: 0; }
@@ -168,7 +168,9 @@ import { STATUS, SOURCE, esc, label, pct, setupKey, describeHttpError, showHealt
 import { createMap, fit, colors, resultPoint } from './static/map.js';
 
 const MAX_ROWS = 500;
-const CHUNK = 10;  // addresses per /v1/verify/batch call, one call in flight (the server runs 5 of them concurrently)
+// Addresses per /v1/verify/batch call, one call in flight. The server works on 5 at a time and streams each result
+// back as it finishes, so a slow row only holds up the end of a chunk; 500 rows are 25 requests, far below the rate limit.
+const CHUNK = 20;
 const MISSING = '缺少街道地址，不会校验';
 
 const $ = (s) => document.querySelector(s);
@@ -192,19 +194,21 @@ const SAMPLE = [
   'asdkjh qwe zzz',
 ].join('\n');
 
-// Header names we recognise, after lower-casing and dropping spaces and _ - . : #
+// Header names we recognise, after lower-casing and dropping spaces and _ - . : # / ( )
 const HEADERS = {
-  address: ['address', 'fulladdress', 'addr', 'singlelineaddress', '地址', '完整地址'],
-  street: ['street', 'streetaddress', 'address1', 'addressline1', 'line1', 'street1', '街道', '街道地址'],
-  unit: ['unit', 'address2', 'addressline2', 'line2', 'apt', 'suite', 'apartment', '单元', '单元号'],
-  city: ['city', 'town', '城市'],
-  state: ['state', 'st', '州'],
-  zip: ['zip', 'zipcode', 'zip5', 'postal', 'postalcode', 'postcode', '邮编'],
+  address: ['address', 'fulladdress', 'addr', 'singlelineaddress', 'completeaddress', '地址', '完整地址', '详细地址'],
+  street: ['street', 'streetaddress', 'address1', 'addressline1', 'addr1', 'line1', 'street1', '街道', '街道地址', '地址1', '地址行1'],
+  unit: ['unit', 'address2', 'addressline2', 'addr2', 'line2', 'apt', 'suite', 'apartment', 'aptsuite', '单元', '单元号', '地址2', '地址行2', '房间号'],
+  city: ['city', 'town', 'cityname', '城市', '市'],
+  state: ['state', 'st', 'province', 'stateprovince', 'stateorprovince', 'statecode', 'region', '州', '省', '州省', '省州'],
+  zip: ['zip', 'zipcode', 'zip5', 'postal', 'postalcode', 'postcode', 'zippostalcode', '邮编', '邮政编码'],
 };
+// Order and shipping exports put a prefix on the same columns: "Shipping Address 1", "Ship City", "收件人地址"
+const HEAD_PREFIX = /^(shipto|shipping|ship|recipient|receiver|consignee|delivery|mailing|customer|收件人|收货人|收件|收货|寄送|配送)/;
 
 // ------------------------------------------------------------------ parsing
 
-const normHead = (s) => s.toLowerCase().replace(/[\s_.\-:#]/g, '');
+const normHead = (s) => s.toLowerCase().replace(/[\s_.\-:#/()（）]/g, '');
 
 function parsePaste(s) {
   // comma is never a delimiter here: one-line addresses are full of them. Tabs come from Excel.
@@ -239,10 +243,11 @@ function sniffDelimiter(s, name) {
 }
 
 // No header, several columns: "1700 W Washington St | Phoenix | AZ | 85007". A comma between state and
-// ZIP would make the parser drop the state, so those two are joined with a space.
+// ZIP would make the parser drop the state, so those two are joined with a space. A 3-4 digit ZIP is one Excel
+// stripped the leading zero from (MA 2108); the server restores it.
 function joinCells(cells) {
   return cells.filter(Boolean).reduce((s, c, i, a) =>
-    (i === 0 ? c : s + (/^\d{5}(-\d{4})?$/.test(c) && /^[A-Za-z]{2}$/.test(a[i - 1]) ? ' ' : ', ') + c), '');
+    (i === 0 ? c : s + (/^\d{3,5}(-\d{4})?$/.test(c) && /^[A-Za-z]{2}$/.test(a[i - 1]) ? ' ' : ', ') + c), '');
 }
 
 const oneLine = (f) => [[f.street, f.unit].filter(Boolean).join(' '), f.city, [f.state, f.zip].filter(Boolean).join(' ')]
@@ -255,8 +260,8 @@ function buildSource(table) {
 
   const map = {};
   table[0].forEach((c, i) => {
-    const h = normHead(c);
-    for (const [k, names] of Object.entries(HEADERS)) if (!(k in map) && names.includes(h)) map[k] = i;
+    const h = normHead(c), bare = h.replace(HEAD_PREFIX, '');
+    for (const [k, names] of Object.entries(HEADERS)) if (!(k in map) && (names.includes(h) || names.includes(bare))) map[k] = i;
   });
   const hasHeader = Object.keys(map).length > 0;
   const data = hasHeader ? table.slice(1) : table;
@@ -338,7 +343,7 @@ async function loadFile(f) {
 
 // ------------------------------------------------------------------ run
 
-let run = null;      // { name, header, rows: [{ n, cells, req, input, state, result, error }], activeMs, segStart, netDone }
+let run = null;      // { name, header, rows: [{ n, cells, req, input, state, result, error }], activeMs, segStart, netDone, saved }
 let active = null;   // AbortController of the running pump; null when stopped
 let dirty = false;   // input changed since the run was created
 let filter = 'all';
@@ -357,7 +362,7 @@ function startRun() {
     rows: src.rows.map((r, i) => ({
       ...r, n: i + 1, state: r.req ? 'pending' : 'done', result: null, error: r.req ? null : MISSING,
     })),
-    activeMs: 0, segStart: 0, netDone: 0,
+    activeMs: 0, segStart: 0, netDone: 0, saved: true,
   };
   dirty = false;
   filter = 'all';
@@ -380,27 +385,33 @@ async function pump() {
       render();
       const opts = { overture_fallback: ov.checked, zip_fallback: zf.checked };
       const hadKey = key.has();
-      let res = null, body = null;
+      const mine = (r) => r.owner === me && r.state === 'running';
+      const land = (it) => {
+        const r = it && chunk[it.index];
+        if (!r || !mine(r)) return;
+        Object.assign(r, { state: 'done', result: it.result || null, error: it.result ? null : it.error || '未知错误' });
+        R.netDone++;
+        R.saved = false;
+        soon();
+      };
+      let res = null, body = null, broken = false;
       try {
-        res = await fetch('v1/verify/batch', {
+        res = await fetch('v1/verify/batch?stream=true', {
           method: 'POST', signal: me.signal,
           headers: { 'Content-Type': 'application/json', ...key.headers() },
           body: JSON.stringify({ addresses: chunk.map((r) => ({ ...r.req, ...opts })) }),
         });
-        body = await res.json().catch(() => null);
-      } catch { /* network error, or aborted by stop() */ }
-      if (active !== me || !res) {  // stopped (possibly mid-body), or the server is unreachable
-        chunk.forEach((r) => { if (r.owner === me && r.state === 'running') r.state = 'pending'; });
-        if (!res && active === me) notice = { title: '连不上服务', msg: '请确认服务正在运行，然后点「继续」。' };
+        if (res.ok && /ndjson/.test(res.headers.get('content-type') || '')) await readLines(res, land);
+        else body = await res.json().catch(() => null);
+      } catch { broken = true; /* network error (possibly mid-stream), or aborted by stop() */ }
+      if (active !== me || !res || broken) {  // stopped, or the server is unreachable: what didn't land goes back
+        chunk.forEach((r) => { if (mine(r)) r.state = 'pending'; });
+        if (active === me) notice = { title: '连不上服务', msg: '请确认服务正在运行，然后点「继续」。' };
         break;
       }
-      if (res.ok && body && Array.isArray(body.results)) {
-        for (const it of body.results) {
-          const r = chunk[it.index];
-          if (r) Object.assign(r, { state: 'done', result: it.result || null, error: it.result ? null : it.error || '未知错误' });
-        }
-        chunk.forEach((r) => { if (r.state === 'running') Object.assign(r, { state: 'done', error: '服务端没有返回这一行' }); });
-        R.netDone += chunk.length;
+      if (res.ok) {
+        if (body && Array.isArray(body.results)) body.results.forEach(land);  // a server that doesn't stream
+        chunk.forEach((r) => { if (mine(r)) Object.assign(r, { state: 'done', error: '服务端没有返回这一行' }); });
       } else if (res.status === 413 && chunkSize > 1) {  // NAD_MAX_BATCH_SIZE was set below our chunk size
         chunkSize = Math.max(1, Math.floor(chunkSize / 2));
         chunk.forEach((r) => { r.state = 'pending'; });
@@ -415,12 +426,37 @@ async function pump() {
         chunk.forEach((r) => Object.assign(r, { state: 'done', error: `${e.title}：${e.msg}` }));
       }
       render();
+      showHealth($('#health'));  // an upstream that started failing shows up in the header
     }
   } finally {
     R.activeMs += performance.now() - t0;
     if (active === me) active = null;
     render();
   }
+}
+
+// NDJSON body -> one callback per parsed line, as each arrives
+async function readLines(res, onItem) {
+  const reader = res.body.getReader(), dec = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    buf += dec.decode(value || new Uint8Array(), { stream: !done });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let it = null;
+      try { it = JSON.parse(line); } catch { /* skip a malformed line; its row is reported missing */ }
+      onItem(it);
+    }
+    if (done) break;
+  }
+}
+
+let renderTimer = 0;
+function soon() {  // results stream in one by one; repaint a few times a second, not once per row
+  if (!renderTimer) renderTimer = setTimeout(() => { renderTimer = 0; render(); }, 150);
 }
 
 function stop() {
@@ -580,8 +616,10 @@ function rowHtml(r) {
     st = `<span class="t-${k.tone}"><span class="sq"></span>${esc(k.t)}</span>`;
     const x = r.result;
     if (x) {
-      const bm = x.best_match, near = (x.suggestions || [])[0];
-      m = bm ? esc(bm.formatted) : near ? `<span class="na">最近门牌</span> ${esc(near.formatted)}` : '<span class="na">—</span>';
+      const bm = x.best_match, near = (x.suggestions || [])[0], g = x.geocode || {};
+      m = [bm ? esc(bm.formatted) : near ? `<span class="na">最近门牌</span> ${esc(near.formatted)}` : '',
+        g.match_count > 1 ? `<span class="w">Census 找到 ${g.match_count} 个同名地址，只核对了第一个</span>` : '']
+        .filter(Boolean).join('<br>') || '<span class="na">—</span>';
       from = SOURCE[x.data_source] || '—';
       conf = x.data_source ? pct(x.confidence) : '—';
     } else {
@@ -607,8 +645,8 @@ function guideHtml() {
   return `<section class="legend"><h2>支持的输入</h2><table>
     ${row('每行一个地址', '一行写完整地址，例如 <code>1700 W Washington St, Phoenix, AZ 85007</code>')}
     ${row('从 Excel 复制', '直接粘贴多列。第一行是表头时按列名识别，没有表头就把各列按顺序拼成一行地址')}
-    ${row('上传 CSV', '表头用 <code>address</code>，或者 <code>street</code> / <code>unit</code> / <code>city</code> / <code>state</code> / <code>zip</code>，也认“地址、街道、城市、州、邮编”。UTF-8 和 GBK 编码都可以')}
-    ${row('导出', '原表的列原样保留，后面追加 <code>verify_status</code>、<code>verify_verdict</code>、<code>verify_matched_address</code> 等结果列')}
+    ${row('上传 CSV', '表头用 <code>address</code>，或者 <code>street</code> / <code>unit</code> / <code>city</code> / <code>state</code> / <code>zip</code>，也认“地址、街道、城市、州、邮编”，以及订单导出里带前缀的列名，如 Shipping Address 1、Ship City、收件人地址。UTF-8 和 GBK 编码都可以')}
+    ${row('导出', '原表的列原样保留，后面追加 <code>verify_status</code>、<code>verify_verdict</code>、<code>verify_matched_address</code>、<code>verify_nearest_number</code>（门牌不存在时同街最近的门牌）等结果列')}
   </table></section>`;
 }
 
@@ -625,7 +663,7 @@ setInterval(() => {
 // ------------------------------------------------------------------ export
 
 const RESULT_COLS = ['verify_status', 'verify_verdict', 'verify_confidence', 'verify_data_source', 'verify_matched_address',
-  'verify_lat', 'verify_lon', 'verify_record_source', 'verify_notes'];
+  'verify_lat', 'verify_lon', 'verify_record_source', 'verify_nearest_number', 'verify_census_matches', 'verify_notes'];
 
 function csvCell(v) {
   let s = v == null ? '' : String(v);
@@ -637,10 +675,11 @@ function csvCell(v) {
 function resultCells(r) {
   if (r.state !== 'done') return RESULT_COLS.map(() => '');
   const x = r.result;
-  if (!x) return ['error', '出错', '', '', '', '', '', '', r.error || ''];
-  const bm = x.best_match || {};
+  if (!x) return ['error', '出错', '', '', '', '', '', '', '', '', r.error || ''];
+  const bm = x.best_match || {}, near = !x.best_match && (x.suggestions || [])[0], g = x.geocode || {};
   return [x.status, label(x.status), x.data_source ? x.confidence : '', x.data_source || '', bm.formatted || '',
-    bm.lat ?? '', bm.lon ?? '', bm.source || '', (x.notes || []).join('; ')];
+    bm.lat ?? '', bm.lon ?? '', bm.source || '', near ? near.formatted : '', g.match_count > 1 ? g.match_count : '',
+    (x.notes || []).join('; ')];
 }
 
 function exportCsv() {
@@ -656,6 +695,7 @@ function exportCsv() {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+  run.saved = true;
 }
 
 // ------------------------------------------------------------------ events
@@ -697,7 +737,8 @@ document.addEventListener('click', (e) => {
   else if (t.hasAttribute('data-export')) exportCsv();
 });
 
-window.addEventListener('beforeunload', (e) => { if (active) e.preventDefault(); });
+// leaving mid-run, or with a sizeable result that was never exported, loses it
+window.addEventListener('beforeunload', (e) => { if (active || (run && !run.saved && run.netDone >= 10)) e.preventDefault(); });
 
 // ------------------------------------------------------------------ init
 

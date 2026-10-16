@@ -20,7 +20,7 @@ import duckdb
 import httpx
 
 from . import config
-from .upstream import TTLCache, UpstreamError
+from .upstream import TTLCache, UpstreamError, _describe
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +93,11 @@ class OvertureClient:
         self._release: str | None = config.OVERTURE_RELEASE or None
         self._release_checked = 0.0
         self._release_lock = asyncio.Lock()
+        self._inflight: dict[str, asyncio.Task] = {}
+        self.status: dict[str, Any] | None = None  # outcome of the latest real (uncached) query, for /health
+
+    def _mark(self, error: str | None) -> None:
+        self.status = {"ok": error is None, "at": time.time(), "error": error}
 
     # ------------------------------------------------------------------ setup
 
@@ -141,7 +146,8 @@ class OvertureClient:
             except httpx.HTTPError as exc:
                 if self._release:  # keep serving the last known release
                     return self._release
-                raise UpstreamError("overture", f"cannot list releases: {exc}") from exc
+                self._mark(f"cannot list releases: {_describe(exc)}")
+                raise UpstreamError("overture", f"cannot list releases: {_describe(exc)}") from exc
             if self._release:
                 return self._release
             raise UpstreamError("overture", "no release with an addresses theme found")
@@ -157,14 +163,22 @@ class OvertureClient:
             cached = self.cache.get(key)
             if cached is not None:
                 return cached
+            # the same box being read already (duplicate rows in a batch): share that DuckDB query
+            task = self._inflight.get(key)
+            if task is None:
+                task = asyncio.create_task(self._run(release, bbox, number, limit))
+                self._inflight[key] = task
+                task.add_done_callback(lambda t, k=key: (self._inflight.pop(k, None), t.cancelled() or t.exception()))
             try:
-                rows = await self._run(release, bbox, number, limit)
+                rows = await asyncio.shield(task)
             except UpstreamError as exc:
                 # The release we were using was deleted: re-discover once and retry.
                 if attempt == 0 and not config.OVERTURE_RELEASE and re.search(r"404|403|NoSuchKey|No files found", exc.message):
                     log.warning("overture release %s unavailable, re-discovering", release)
                     continue
+                self._mark(exc.message)
                 raise
+            self._mark(None)
             recs = [overture_record(r) for r in rows]
             self.cache.set(key, recs)
             return recs

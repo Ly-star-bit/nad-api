@@ -52,17 +52,42 @@ export function describeHttpError(status, body, hadKey) {
   return { title: `请求失败（HTTP ${status}）`, msg: (Array.isArray(d) ? d.map((x) => x.msg).join('；') : d) || '服务返回了错误。' };
 }
 
+const UPSTREAM = {
+  census_geocoder: 'Census 地理编码', nad: 'NAD 地址库', nad_coverage: 'NAD 覆盖范围', tigerweb: 'Census ZIP 范围', overture: 'Overture',
+};
+const ago = (s) => (s < 60 ? '刚刚' : s < 3600 ? `${Math.round(s / 60)} 分钟前` : `${Math.round(s / 3600)} 小时前`);
+
+// Header indicator. /health reports how each upstream's latest call went, so a blocked Census shows up here
+// instead of as a string of unexplained failures. Called again after queries to stay current.
 export function showHealth(el) {
   fetch('health').then((r) => r.json()).then((h) => {
     const o = h.overture || {};
-    const state = h.status === 'ok' ? '服务正常' : '服务降级';
+    const bad = Object.entries(h.upstreams || {}).filter(([, v]) => !v.ok);
+    const name = (k) => UPSTREAM[k] || k;
+    const state = !bad.length ? (h.status === 'ok' ? '服务正常' : '服务降级')
+      : bad.length === 1 ? `${name(bad[0][0])}不可用` : `${bad.length} 个上游服务不可用`;
     const ov = o.enabled ? `Overture ${o.release || '已启用'}` : 'Overture 未启用';
     el.className = `health ${h.status === 'ok' ? 'ok' : 'bad'}`;
-    el.title = `${state} · ${ov}`;
-    el.innerHTML = `<i></i><span>${state}</span><span class="rel">· ${esc(ov)}</span>`;
+    el.title = bad.length
+      ? bad.map(([k, v]) => `${name(k)}（${ago(v.ago_s)}）：${v.error}`).join('\n')
+      : `${state} · ${ov}`;
+    el.innerHTML = `<i></i><span>${esc(state)}</span>${bad.length ? '' : `<span class="rel">· ${esc(ov)}</span>`}`;
   }).catch(() => {
     el.className = 'health bad';
     el.title = '服务不可达';
     el.innerHTML = '<i></i><span>服务不可达</span>';
   });
+}
+
+// navigator.clipboard only exists on https:// and localhost; a server opened by IP over http needs the old way.
+export function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text).then(() => true, () => false);
+  const ta = Object.assign(document.createElement('textarea'), { value: text, readOnly: true });
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+  document.body.append(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { /* not supported */ }
+  ta.remove();
+  return Promise.resolve(ok);
 }

@@ -17,6 +17,23 @@ from app.address import StreetKey, norm_unit, parse_oneline, parse_structured, s
         ("12A Elm Street Rear, Boston, MA", 12, "A", "Elm Street", "REAR", "Boston", "MA", ""),
         ("100 1/2 Oak Ave, Austin TX 78701", 100, "1/2", "Oak Ave", "", "Austin", "TX", "78701"),
         ("1 Park Ave New York NY 10016", 1, "", "Park Ave", "", "New York", "NY", "10016"),
+        # full-width commas / digits from a Chinese IME
+        ("1700 W Washington St，Phoenix，AZ 85007", 1700, "", "W Washington St", "", "Phoenix", "AZ", "85007"),
+        ("１７００ W Washington St, Phoenix, AZ 85007", 1700, "", "W Washington St", "", "Phoenix", "AZ", "85007"),
+        # every designator leaves the street, the last one is the unit
+        ("100 Main St Bldg 2 Apt 5, Springfield, IL 62701", 100, "", "Main St", "5", "Springfield", "IL", "62701"),
+        ("123 Main St PMB 456, Phoenix, AZ 85007", 123, "", "Main St", "456", "Phoenix", "AZ", "85007"),
+        # unit words that are street names
+        ("100 Pier Ave, Hermosa Beach, CA 90254", 100, "", "Pier Ave", "", "Hermosa Beach", "CA", "90254"),
+        ("2100 Space Park Dr, Houston, TX 77058", 2100, "", "Space Park Dr", "", "Houston", "TX", "77058"),
+        # full state names, with and without commas
+        ("1700 W Washington St, Phoenix, Arizona 85007", 1700, "", "W Washington St", "", "Phoenix", "AZ", "85007"),
+        ("350 5th Ave New York New York 10118", 350, "", "5th Ave", "", "New York", "NY", "10118"),
+        ("1 Main St, Charleston, West Virginia 25301", 1, "", "Main St", "", "Charleston", "WV", "25301"),
+        # ZIP that lost its leading zero in a spreadsheet; a typo'd ZIP keeps the state
+        ("1 Beacon St, Boston, MA 2108", 1, "", "Beacon St", "", "Boston", "MA", "02108"),
+        ("12 Elm St, Phoenix, AZ 8500", 12, "", "Elm St", "", "Phoenix", "AZ", ""),
+        ("100½ Oak Ave, Austin TX 78701", 100, "1/2", "Oak Ave", "", "Austin", "TX", "78701"),
     ],
 )
 def test_parse_oneline(text, number, suffix, street, unit, city, state, zip5):
@@ -42,6 +59,21 @@ def test_parse_structured():
     assert (pa.state, pa.zip5, pa.zip4) == ("AZ", "85003", "1234")
 
 
+def test_parse_structured_spreadsheet_values():
+    pa = parse_structured("1 Beacon St", "Boston", "Massachusetts", "2108")
+    assert (pa.state, pa.zip5) == ("MA", "02108")
+    assert "02108" in pa.warnings[0]
+    # only padded when the result is a ZIP of that state
+    pa = parse_structured("1 Main St", "Phoenix", "AZ", "8500")
+    assert pa.zip5 == "" and "unrecognized" in pa.warnings[0]
+
+
+def test_po_box_gets_a_specific_warning():
+    pa = parse_oneline("P.O. Box 123, Phoenix, AZ 85001")
+    assert pa.house is None
+    assert "PO Box" in pa.warnings[0]
+
+
 @pytest.mark.parametrize(
     "query, cand, at_least",
     [
@@ -61,6 +93,10 @@ def test_street_score_matches(query, cand, at_least):
     [
         (("E", "", "WASHINGTON", "ST", ""), ("West", "", "Washington", "Street", "")),  # opposite direction
         (("W", "", "WASHINGTON", "ST", ""), ("West", "", "Linden", "Street", "")),  # different street
+        (("", "", "5TH", "AVE", ""), ("", "", "3", "Avenue", "")),  # 0.8 as text
+        (("W", "", "34TH", "ST", ""), ("West", "", "35", "Street", "")),
+        (("", "US HWY", "101", "", ""), ("", "US Highway", "10", "", "")),
+        (("NW", "", "5TH", "ST", ""), ("Northwest", "", "5", "Avenue", "")),  # grid: these cross each other
     ],
 )
 def test_street_score_rejects(query, cand):
@@ -72,6 +108,7 @@ def test_street_key_from_text():
     assert (k.predir, k.core, k.posttype, k.postdir) == ("N", "MAIN", "ST", "SW")
 
 
-@pytest.mark.parametrize("raw, expected", [("Apt. #4-B", "4B"), ("Unit 12", "12"), ("STE 1750", "1750"), ("#3F", "3F")])
+@pytest.mark.parametrize("raw, expected", [("Apt. #4-B", "4B"), ("Unit 12", "12"), ("STE 1750", "1750"), ("#3F", "3F"),
+                                           ("Unit 0012", "12"), ("002A", "2A"), ("0", "0")])
 def test_norm_unit(raw, expected):
     assert norm_unit(raw) == expected

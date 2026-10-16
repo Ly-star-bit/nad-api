@@ -39,6 +39,10 @@ class UpstreamError(Exception):
         self.message = message
 
 
+class UpstreamRejected(UpstreamError):
+    """The upstream answered but refused the request (HTTP 4xx): the input is the problem, not the service."""
+
+
 def _describe(exc: BaseException | None) -> str:
     """Name a transport failure. httpx's async ConnectError is empty when the peer resets the connection during
     the TLS handshake (typical of a firewall in the path), so add the innermost exception, which has the OS error."""
@@ -91,15 +95,43 @@ class Upstream:
             follow_redirects=True,
         )
         self.cache = TTLCache(config.CACHE_TTL_S, config.CACHE_MAX_ENTRIES)
+        self._inflight: dict[str, asyncio.Task] = {}
+        # service -> outcome of its latest real (uncached) call, so /health can say which upstream is failing
+        self.status: dict[str, dict[str, Any]] = {}
 
     async def aclose(self) -> None:
         await self.client.aclose()
 
-    async def _get_json(self, service: str, url: str, params: dict[str, Any]) -> dict:
+    async def _get_json(self, service: str, url: str, params: dict[str, Any], *, cache: bool = True) -> dict:
+        """`cache=False` always asks the upstream (health checks); the answer is still cached for others."""
         key = url + "?" + json.dumps(params, sort_keys=True, default=str)
-        cached = self.cache.get(key)
-        if cached is not None:
-            return cached
+        if cache:
+            cached = self.cache.get(key)
+            if cached is not None:
+                return cached
+        # Identical requests already on their way (the same address twice in a batch, the same county for
+        # neighbours) wait for that one call instead of making their own.
+        task = self._inflight.get(key)
+        if task is None:
+            task = asyncio.create_task(self._fetch(service, url, params, key))
+            self._inflight[key] = task
+            task.add_done_callback(lambda t: (self._inflight.pop(key, None), t.cancelled() or t.exception()))
+        return await asyncio.shield(task)  # a caller that gives up doesn't cancel the call for the others
+
+    async def _fetch(self, service: str, url: str, params: dict[str, Any], key: str) -> dict:
+        try:
+            data = await self._request(service, url, params)
+        except UpstreamRejected:
+            self.status[service] = {"ok": True, "at": time.time(), "error": None}  # it answered
+            raise
+        except UpstreamError as exc:
+            self.status[service] = {"ok": False, "at": time.time(), "error": exc.message}
+            raise
+        self.status[service] = {"ok": True, "at": time.time(), "error": None}
+        self.cache.set(key, data)
+        return data
+
+    async def _request(self, service: str, url: str, params: dict[str, Any]) -> dict:
         last_exc: Exception | None = None
         for attempt in range(2):
             try:
@@ -113,6 +145,12 @@ class Upstream:
             if resp.status_code >= 500 and attempt == 0:
                 await asyncio.sleep(0.3)
                 continue
+            if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                try:  # Census: {"errors": ["Specify House number and Street name along with City and State ..."]}
+                    errors = resp.json().get("errors") or []
+                except (ValueError, AttributeError):
+                    errors = []
+                raise UpstreamRejected(service, f"HTTP {resp.status_code}" + (f": {'; '.join(map(str, errors))}" if errors else ""))
             if resp.status_code != 200:
                 raise UpstreamError(service, f"HTTP {resp.status_code}")
             try:
@@ -124,9 +162,26 @@ class Upstream:
                 err = data["error"]
                 detail = "; ".join(err.get("details") or []) or err.get("message") or "unknown error"
                 raise UpstreamError(service, f"ArcGIS error {err.get('code')}: {detail}")
-            self.cache.set(key, data)
             return data
         raise UpstreamError(service, f"connection failed: {_describe(last_exc)}")
+
+    async def ping(self) -> dict[str, str | None]:
+        """One uncached call to each upstream except NAD (see nad_count) -> {service: None if it answered, else the error}."""
+        checks = {
+            "census_geocoder": (f"{config.CENSUS_GEOCODER_URL}/benchmarks", {"format": "json"}),
+            "nad_coverage": (config.COVERAGE_LAYER_URL, {"f": "json"}),
+            "tigerweb": (config.ZCTA_LAYER_URL, {"f": "json"}),
+        }
+
+        async def one(service: str, url: str, params: dict) -> str | None:
+            try:
+                await self._get_json(service, url, params, cache=False)
+            except UpstreamError as exc:
+                return exc.message
+            return None
+
+        errors = await asyncio.gather(*(one(s, u, p) for s, (u, p) in checks.items()))
+        return dict(zip(checks, errors))
 
     # ------------------------------------------------------------------ Census geocoder
 
@@ -218,7 +273,7 @@ class Upstream:
 
     async def nad_count(self) -> int:
         data = await self._get_json(
-            "nad", f"{config.NAD_LAYER_URL}/query", {"where": "1=1", "returnCountOnly": "true", "f": "json"}
+            "nad", f"{config.NAD_LAYER_URL}/query", {"where": "1=1", "returnCountOnly": "true", "f": "json"}, cache=False,
         )
         return int(data.get("count", 0))
 
@@ -313,6 +368,9 @@ def _first_census_match(data: dict) -> dict | None:
     m = matches[0]
     county = ((m.get("geographies") or {}).get("Counties") or [{}])[0]
     comps = m.get("addressComponents") or {}
+    # "100 Main St, Springfield" matches seven Springfields; the other matches let the caller pick
+    alternatives = [{"matched_address": x.get("matchedAddress"), "lat": x["coordinates"]["y"], "lon": x["coordinates"]["x"]}
+                    for x in matches[1:6] if x.get("coordinates")]
     return {
         "matched_address": m.get("matchedAddress"),
         "lat": m["coordinates"]["y"],
@@ -324,6 +382,7 @@ def _first_census_match(data: dict) -> dict | None:
         "zip": comps.get("zip"),
         "tiger_line_id": (m.get("tigerLine") or {}).get("tigerLineId"),
         "match_count": len(matches),
+        **({"alternatives": alternatives} if alternatives else {}),
     }
 
 

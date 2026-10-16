@@ -52,6 +52,10 @@
 .notes li::before { content: "–"; position: absolute; left: 0; color: var(--muted); }
 
 .hint { margin: 0; font-size: 14px; color: var(--ink-2); }
+.amb h3 { color: var(--warn); }
+.amb .hint { margin-bottom: 8px; }
+.maplinks .linkbtn { font-size: inherit; }
+.maplinks .sep { padding: 0; }
 
 .raw { padding-top: 14px; padding-bottom: 14px; }
 .raw summary { cursor: pointer; font-size: 13px; color: var(--ink-2); }
@@ -142,7 +146,7 @@
 </div>
 
 <script type="module">
-import { STATUS, SOURCE, store, esc, tone, label, pct, fmtMs, setupKey, describeHttpError, showHealth } from './static/common.js';
+import { STATUS, SOURCE, store, esc, tone, label, pct, fmtMs, setupKey, describeHttpError, showHealth, copyText } from './static/common.js';
 import { createMap, fit, colors, resultPoint } from './static/map.js';
 
 const $ = (s) => document.querySelector(s);
@@ -212,8 +216,10 @@ function renderError(title, msg) {
 function renderResult(r) {
   const st = STATUS[r.status] || { t: r.status, tone: 'none' };
   const bm = r.best_match;
+  const censusDown = r.status === 'upstream_error' && !r.geocode && (r.notes || []).some((n) => n.startsWith('census geocoder unavailable'));
   const desc = r.status === 'verified'
     ? (r.match_level === 'unit' ? '门牌、街道和单元号都有记录。' : '门牌和街道都有记录。')
+    : censusDown ? '连不上 Census 地理编码服务，没法给地址定位，这不代表地址有问题。一直这样的话，多半是服务器访问 census.gov 的网络不通，原因见下方服务端说明。'
     : st.d || '';
   document.title = `${st.t} · ${r.input} — NAD 地址校验`;
 
@@ -232,11 +238,14 @@ function renderResult(r) {
 
   const lines = bm ? addrLines(bm) : [r.input];
   const pt = resultPoint(r);
+  const tools = [bm ? '<button type="button" class="linkbtn" data-copy-addr>复制地址</button>' : '', pt ? mapLinks(pt, !bm) : '']
+    .filter(Boolean).join('<span class="sep">/</span>');
   h += `<section class="sec">
       <div class="k">${bm ? '匹配到的记录' : '输入的地址'}</div>
       <p class="addr${bm ? '' : ' typed'}">${lines.map(esc).join('<br>')}</p>
-      ${pt ? mapLinks(pt, !bm) : ''}
+      ${tools ? `<div class="maplinks">${tools}</div>` : ''}
     </section>`;
+  h += ambiguity(r);
   if (pt) h += `<section class="map-sec"><div id="map" class="map"></div>${mapKey(r)}</section>`;
 
   if (r.status === 'geocode_failed') {
@@ -334,9 +343,23 @@ async function drawResultMap(r) {
 
 function mapLinks(p, approx) {
   const ll = `${p.lat.toFixed(6)},${p.lon.toFixed(6)}`;
-  return `<div class="maplinks"><span>${approx ? '定位点' : '在地图上查看'}</span>
+  return `<span>${approx ? '定位点' : '在地图上查看'}</span>
     <a href="https://www.openstreetmap.org/?mlat=${p.lat}&amp;mlon=${p.lon}#map=18/${p.lat}/${p.lon}" target="_blank" rel="noopener">OpenStreetMap ↗</a>
-    <a href="https://www.google.com/maps/search/?api=1&amp;query=${ll}" target="_blank" rel="noopener">Google 地图 ↗</a></div>`;
+    <a href="https://www.google.com/maps/search/?api=1&amp;query=${ll}" target="_blank" rel="noopener">Google 地图 ↗</a>`;
+}
+
+// Census matched several addresses (no state / ZIP given): only the first was checked, so offer the others.
+function ambiguity(r) {
+  const g = r.geocode || {}, alts = g.alternatives || [];
+  if (!alts.length) return '';
+  const rows = alts.map((a) => `<tr data-q="${esc(a.matched_address)}" tabindex="0">
+      <td class="a">${esc(a.matched_address)}</td><td class="act">校验 →</td></tr>`).join('');
+  return `<section class="sec amb">
+      <h3>这个地址对应 ${g.match_count} 个地方</h3>
+      <p class="hint">Census 找到 ${g.match_count} 个符合的地址，上面只核对了第一个（<span class="mono">${esc(g.matched_address)}</span>）。
+        补上州或 ZIP 就能确定是哪一个，也可以直接点下面的地址校验。</p>
+      <table><tbody>${rows}</tbody></table>
+    </section>`;
 }
 
 function checks(m) {
@@ -468,6 +491,7 @@ async function run(push) {
     if (my === ctl) renderError('连不上服务', '请确认服务正在运行，然后重试。');
   } finally {
     if (my === ctl) stop();
+    showHealth($('#health'));  // an upstream that just failed shows up in the header
   }
 }
 
@@ -486,7 +510,7 @@ form.addEventListener('submit', (e) => { e.preventDefault(); run(true); });
 window.addEventListener('popstate', fromUrl);
 
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-q], [data-clear], [data-cancel], [data-retry-zip], [data-copy]');
+  const t = e.target.closest('[data-q], [data-clear], [data-cancel], [data-retry-zip], [data-copy], [data-copy-addr]');
   if (!t) return;
   if (t.dataset.q != null) {
     q.value = t.dataset.q;
@@ -502,12 +526,19 @@ document.addEventListener('click', (e) => {
     zf.checked = true;
     run(true);
   } else if (t.hasAttribute('data-copy')) {
-    navigator.clipboard.writeText(lastJson).then(() => {
-      t.textContent = '已复制';
-      setTimeout(() => { t.textContent = '复制 JSON'; }, 1500);
-    }, () => {});
+    copied(t, lastJson);
+  } else if (t.hasAttribute('data-copy-addr')) {
+    copied(t, (lastResult.best_match.formatted || '').toUpperCase());
   }
 });
+function copied(btn, text) {
+  btn.dataset.label ||= btn.textContent;
+  copyText(text).then((ok) => {
+    btn.textContent = ok ? '已复制' : '复制失败';
+    setTimeout(() => { btn.textContent = btn.dataset.label; }, 1500);
+  });
+}
+
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.target.matches('tr[data-q]')) e.target.click();
 });

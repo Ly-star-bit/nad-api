@@ -29,6 +29,22 @@ NAD 查不到时用 **Overture Maps 地址数据** 兜底。
           Overture 按 bbox(1500 m) + 门牌查询 → 同一套比对逻辑 → 结论更好则采用
 ```
 
+几处细节：
+
+- **跳过无用的 1500 m 搜索**：300 m 内没找到门牌时，先拉 300 m 内所有点（同时用来给出同街门牌建议）。如果这条街
+  在门牌两侧都已经有门牌（比如要查 1716，附近有 1700 和 1818），那 1716 只可能在两者之间、也就在 300 m 内，
+  1500 m 搜索只会找到别的街上的同号门牌，直接跳过。曼哈顿这类密集区 1500 m 搜索要 5–18 s。
+- **街道比对**：编号街道必须号码一致（`5th Ave` 和 `3rd Ave` 按字符相似度是 0.8，曾被判成同一条街）；
+  同名不同类型（`NW 5th St` / `NW 5th Ave`，网格城市里是两条交叉的街）不算匹配。
+- **Overture 只做能改变结论的查询**：NAD 已经是 `street_only` 时，Overture 只查门牌，不再做街道探测
+  （探测最多得到同样的 `street_only`，而同级结论不会替换 NAD 的结果）。
+- **同一时刻的相同上游请求合并成一次**（批量里重复的地址、相邻地址的同一个县），结果照常进缓存。
+- **输入清洗**：全角逗号/数字/空格（中文输入法）、`Bldg 2 Apt 5` 这类多个单元标识、`PMB`、州全称（`Arizona`）、
+  被 Excel 去掉前导 0 的 ZIP（`MA 2108` → `02108`，只在补 0 后的 ZIP 属于该州时才补）、单元号前导 0（`Unit 0012` = `12`）；
+  `Pier Ave`、`Space Park Dr` 这类含单元关键词的街名不会被误当成单元。PO Box 返回 `invalid_input` 并说明原因。
+- **Census 匹配到多个地址**（如只写 `100 Main St, Springfield`，有 7 个州的 Springfield）：只核对第一个，
+  `geocode.match_count` / `geocode.alternatives` 给出其他候选，`notes` 提示补上州或 ZIP。
+
 ### Overture 兜底
 
 NAD 只覆盖约 2/3 的县（加州大部分县、Irvine、LA、旧金山等都没有）。Overture 的美国地址除 NAD 外还汇集了
@@ -69,9 +85,16 @@ docker build -t nad-api . && docker run -p 8000:8000 nad-api
   `/` 按 `Accept` 头区分：浏览器拿到页面，`curl` 等 API 客户端仍拿到原来的 JSON。
 - `http://<host>:8000/batch`：批量校验，一次最多 500 行。可以每行粘贴一个地址、从 Excel 复制多列，或上传 CSV
   （表头 `address`，或 `street` / `unit` / `city` / `state` / `zip`，也认中文表头；UTF-8 / GBK 均可）。
-  页面按每批 10 条串行调用 `/v1/verify/batch`，结果边查边出，可停止、继续、重试失败行；地图按结论着色显示每一行
-  （没有匹配记录时用 Census 定位点），跟随筛选，点圆点看详情。导出 CSV 时原表的列原样保留，
-  后面追加 `verify_status`、`verify_verdict`、`verify_confidence`、`verify_matched_address` 等结果列。
+  订单导出里带前缀的列名（`Shipping Address 1`、`Ship City`、`收件人地址`、`收货城市` 等）也能识别。
+  页面按每批 20 条调用 `/v1/verify/batch?stream=true`，每条查完立刻显示（不用等同批最慢的那条），可停止、继续、
+  重试失败行；地图按结论着色显示每一行（没有匹配记录时用 Census 定位点），跟随筛选，点圆点看详情。
+  导出 CSV 时原表的列原样保留，后面追加 `verify_status`、`verify_verdict`、`verify_confidence`、`verify_matched_address`、
+  `verify_nearest_number`（门牌不存在时同街最近的门牌）、`verify_census_matches`（Census 匹配到多个地址时的个数）等结果列。
+  有 10 行以上结果还没导出就离开页面时，浏览器会提示。
+- 页头的状态点显示各上游最近一次调用的结果，例如服务器连不上 Census 时会显示“Census 地理编码不可用”，
+  鼠标悬停看具体错误。
+
+所有响应都做 gzip 压缩（一批 10 条结果 48 KB → 6 KB，leaflet.js 147 KB → 43 KB），服务器离用户远时差别明显。
 
 页面文件在 `app/static/`（`index.html`、`batch.html`，共用 `style.css`、`common.js`、`map.js`）。地图用 Leaflet 1.9.4
 （BSD-2，随项目放在 `app/static/vendor/leaflet/`，用到时才加载），唯一的外部资源是 OpenStreetMap 的底图瓦片：
@@ -122,13 +145,16 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 | `street_only` | 附近有这条街，但没有这个门牌；`suggestions` 给出同街最接近的门牌 |
 | `not_found` | 该地区有数据覆盖，但无匹配 —— 较大概率是错误/虚构地址 |
 | `not_covered` | NAD 和 Overture 在该地区都没有数据，无法判断 |
-| `geocode_failed` | Census 无法定位；带 ZIP 可加 `zip_fallback=true` 重试 |
-| `invalid_input` | 解析不出门牌号 |
-| `upstream_error` | 免费上游超时/故障 |
+| `geocode_failed` | Census 找不到这个地址（或拒绝了输入）；带 ZIP 可加 `zip_fallback=true` 重试 |
+| `invalid_input` | 解析不出门牌号（PO Box 也在此列，`notes` 会说明） |
+| `upstream_error` | 免费上游超时/故障，包括连不上 Census 地理编码 —— 这种情况不代表地址有问题 |
 
 ### `POST /v1/verify/batch`
 
 `{"addresses": [ {...VerifyRequest}, ... ]}`，单次最多 100 条，并发 5（可配）。返回每条结果 + `summary` 统计。
+
+加 `?stream=true` 时返回 `application/x-ndjson`：每查完一条输出一行 `{"index": i, "result": {...}}`（顺序按完成先后），
+客户端断开后剩下的地址不再查询。
 
 ### `GET /v1/nad/near?lat=&lon=&radius=100&limit=20&number=`
 
@@ -143,9 +169,11 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 县参与状态。注意该图层同时含“整县”和“城市级”多边形（如 Orange County 整体无数据，但 Costa Mesa 有），
 因此按点查询时取最小的包含多边形；点查询失败（如纽约县）时退回按县名查询。
 
-### `GET /health?deep=true`
+### `GET /health` / `GET /health?deep=true`
 
-返回 NAD 点数/延迟，以及 Overture 是否启用、当前 release。
+`upstreams` 列出每个上游（`census_geocoder`、`nad`、`nad_coverage`、`tigerweb`、`overture`）最近一次真实调用是否成功、
+错误信息和距今秒数；任一失败时 `status` 为 `degraded`。不带参数时不发任何上游请求；`deep=true` 会立即（不走缓存）
+请求每个上游，并返回 NAD 点数/延迟、Overture 当前 release。
 
 ## 配置（环境变量）
 
@@ -173,7 +201,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 ## 测试
 
 ```bash
-.venv/bin/python -m pytest -q tests                      # 离线：解析/归一化/Overture 映射与判定、网页路由、上游报错（43 个）
+.venv/bin/python -m pytest -q tests                      # 离线：解析/归一化、判定流程、Overture 映射、网页路由、上游客户端（75 个）
 .venv/bin/python scripts/smoke_test.py http://127.0.0.1:8000   # 在线：17 个真实地址端到端（含 Overture 兜底）
 ```
 

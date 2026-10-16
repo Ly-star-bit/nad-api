@@ -1,5 +1,7 @@
 """The web page is served at / to browsers, while API clients keep getting the JSON index (no network)."""
 
+import json
+
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -28,11 +30,31 @@ def test_batch_page():
 
 
 def test_shared_assets_are_served_and_revalidated():
-    for path, ctype in (
-        ("/static/style.css", "text/css"), ("/static/common.js", "javascript"), ("/static/map.js", "javascript"),
-        ("/static/vendor/leaflet/leaflet.js", "javascript"), ("/static/vendor/leaflet/leaflet.css", "text/css"),
-    ):
+    for path, ctype in (("/static/style.css", "text/css"), ("/static/common.js", "javascript"), ("/static/map.js", "javascript")):
         r = client.get(path)
         assert r.status_code == 200
         assert ctype in r.headers["content-type"]
         assert r.headers["cache-control"] == "no-cache"
+    for path, ctype in (("/static/vendor/leaflet/leaflet.js", "javascript"), ("/static/vendor/leaflet/leaflet.css", "text/css")):
+        r = client.get(path)
+        assert r.status_code == 200
+        assert ctype in r.headers["content-type"]
+        assert "max-age" in r.headers["cache-control"]
+
+
+def test_responses_are_compressed():
+    r = client.get("/static/vendor/leaflet/leaflet.js", headers={"accept-encoding": "gzip"})
+    assert r.headers["content-encoding"] == "gzip"
+    assert len(r.content) > 100_000  # httpx decompressed it
+    r = client.get("/batch", headers={"accept-encoding": "gzip"})
+    assert r.headers["content-encoding"] == "gzip"
+
+
+def test_batch_streams_one_line_per_address():
+    # invalid input is answered before any upstream call, so no lifespan / network is needed
+    app.state.upstream, app.state.overture = None, None
+    r = client.post("/v1/verify/batch?stream=true", json={"addresses": [{"address": "asdkjh"}, {"address": "qwe zzz"}]})
+    assert r.headers["content-type"].startswith("application/x-ndjson")
+    items = [json.loads(line) for line in r.text.splitlines()]
+    assert sorted(it["index"] for it in items) == [0, 1]
+    assert all(it["result"]["status"] == "invalid_input" for it in items)
