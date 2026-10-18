@@ -56,10 +56,20 @@ export function colors() {
   };
 }
 
-// best_match, else the geocoded point (a ZIP-area search has an extent, not a point)
+// best_match, else the geocoded point (a ZIP-area search has an extent, not a point), else - for an official
+// register's street_only / not_found, which has neither - the nearest number it suggests on the same street.
+// Candidates (other streets or towns) are never used: they are not where the input is.
 export function resultPoint(r) {
-  for (const p of [r && r.best_match, r && r.geocode]) {
-    if (p && Number.isFinite(p.lat) && Number.isFinite(p.lon)) return p;
-  }
-  return null;
+  const p = pointOf(r);
+  return p && p.point;
+}
+
+// -> { point, kind: 'match' | 'geocode' | 'nearby' } or null
+export function pointOf(r) {
+  const ok = (p) => p && Number.isFinite(p.lat) && Number.isFinite(p.lon);
+  if (!r) return null;
+  if (ok(r.best_match)) return { point: r.best_match, kind: 'match' };
+  if (ok(r.geocode)) return { point: r.geocode, kind: 'geocode' };
+  const s = (r.suggestions || []).find(ok);
+  return s ? { point: s, kind: 'nearby' } : null;
 }

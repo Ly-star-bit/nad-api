@@ -16,11 +16,15 @@ from fastapi.staticfiles import StaticFiles
 
 from . import config
 from .address import fix_zip, norm_unit, parse_oneline, parse_structured, prep, state_abbr
-from .intl import COUNTRIES, Ctx, JapanPost, country_in_text, resolve_country, verify_intl
+from .intl import COUNTRIES, Ctx, JapanPost, country_in_text, country_name, known_country, supported, verify_intl
+from .intl.countries import (
+    crown_dependency, default_wins, postcode_in, structured_country, us_state_tail,
+)
 from .intl import INFO as INTL_INFO
+from .intl.core import PROBES as INTL_PROBES
 from .models import (
-    BatchItem, BatchRequest, BatchResponse, CoverageResponse, NearResponse, OvertureNearResponse, VerifyRequest,
-    VerifyResponse,
+    BatchItem, BatchRequest, BatchResponse, CountryInfo, CoverageResponse, NearResponse, OvertureNearResponse,
+    VerifyRequest, VerifyResponse,
 )
 from .overture import OvertureClient
 from .upstream import Upstream, UpstreamError
@@ -36,7 +40,7 @@ async def lifespan(app: FastAPI):
         app.state.overture = OvertureClient(app.state.upstream.client)
         tasks.append(asyncio.create_task(app.state.overture.warmup()))  # background; never blocks startup
     app.state.japanpost = JapanPost(app.state.upstream.client, Path(config.DATA_DIR))
-    tasks.append(asyncio.create_task(app.state.japanpost.ensure()))  # romaji Japanese addresses need it
+    tasks.append(asyncio.create_task(app.state.japanpost.run()))  # loads, refreshes monthly, retries with back-off
     yield
     for t in tasks:
         if not t.done():
@@ -99,14 +103,43 @@ async def upstream_error_handler(_: Request, exc: UpstreamError):
     return JSONResponse({"detail": f"upstream service error ({exc.service}): {exc.message}"}, status_code=502)
 
 
+def _unsupported(value: str, code: str | None) -> HTTPException:
+    named = f" ({country_name(code)})" if code else ""
+    return HTTPException(422, f"unsupported country '{value}'{named}: this service covers the US, Europe and Japan "
+                              "(本服务只核验美国、欧洲和日本的地址); supported: US, " + ", ".join(sorted(COUNTRIES)))
+
+
 def _country(req: VerifyRequest) -> str:
-    if req.country:
-        code = resolve_country(req.country)
-        if code is None:
-            raise HTTPException(422, f"unsupported country '{req.country}'; supported: US, "
-                                     + ", ".join(sorted(COUNTRIES)))
-        return code
-    return country_in_text(req.address or req.street) or "US"
+    """The explicit country; else the one the address names (a US state + ZIP is the US); else the caller's
+    default; else the US."""
+    text = req.address or ", ".join(p for p in (req.street, req.city, req.state, req.zip) if p)
+    if req.country and req.country.strip():
+        code = known_country(req.country)
+        if not supported(code):
+            raise _unsupported(req.country.strip(), code)
+        return crown_dependency(code, text)
+    if req.address:
+        code = country_in_text(req.address)
+    else:
+        code = structured_country(req.street, req.city, req.state, req.zip)
+    raw_default = (req.default_country or "").strip()
+    default = known_country(raw_default) if raw_default else None
+    # a batch's own code or province after the town: "Berlin, DE" in a German batch, "Milano MI 20121" in an Italian one
+    own = bool(default) and (default_wins(default, req.address, code=code) if req.address
+                             else default_wins(default, text, req.state or "", req.zip, code=code))
+    if own and code != default:
+        code = None
+    if code is None and raw_default:
+        if not supported(default):
+            raise _unsupported(raw_default, default)
+        code = default
+        # a batch default doesn't take a line that ends with a US state ("..., Springfield, IL"), unless the line
+        # also has the default country's postcode ("Via Roma 10, 20121 Milano MI": MI is Milan's province)
+        if code != "US" and not own and us_state_tail(text) and not postcode_in(code, text):
+            code = "US"
+    if code is not None and not supported(code):
+        raise _unsupported(code, code)
+    return crown_dependency(code or "US", text)
 
 
 async def _run_verify(req: VerifyRequest) -> dict:
@@ -114,7 +147,7 @@ async def _run_verify(req: VerifyRequest) -> dict:
     if country != "US":
         return await verify_intl(
             Ctx(app.state.upstream, app.state.overture), getattr(app.state, "japanpost", None), country,
-            address=req.address, street=req.street, city=req.city, postcode=req.zip, unit=req.unit,
+            address=req.address, street=req.street, city=req.city, postcode=req.zip, unit=req.unit, state=req.state,
             overture_fallback=req.overture_fallback, max_candidates=req.max_candidates)
     if req.address and not req.street:
         pa = parse_oneline(req.address)
@@ -178,11 +211,15 @@ async def batch_page():
 
 
 US_SERVICES = {"census_geocoder", "nad", "nad_coverage", "tigerweb", "overture"}
+DEEP_EVERY_S = 60  # a deep check calls ~25 services (Photon, the national registers): at most once a minute
+_deep: dict = {"at": 0.0, "body": {}, "lock": None}
 
 
 @app.get("/health", tags=["meta"])
-async def health(deep: bool = Query(False, description="Call every upstream now (uncached) instead of only "
-                                                       "reporting how each one's latest call went")):
+async def health(request: Request, deep: bool = Query(False, description="Call every upstream now (uncached) instead "
+                                                                         "of only reporting how each one's latest call "
+                                                                         "went; at most once a minute, needs the API key "
+                                                                         "when keys are set")):
     """`upstreams` has the outcome of each upstream's latest real call; `status` is `degraded` when any failed."""
     up: Upstream = app.state.upstream
     ov: OvertureClient | None = app.state.overture
@@ -190,6 +227,8 @@ async def health(deep: bool = Query(False, description="Call every upstream now 
         "status": "ok", "cache_entries": len(up.cache), "nad_layer": config.NAD_LAYER_URL,
         "overture": {"enabled": ov is not None, "release": ov._release if ov else None},
     }
+    if deep and config.API_KEYS and request.headers.get("x-api-key") not in config.API_KEYS:
+        raise HTTPException(401, "deep=true calls every upstream service: send X-API-Key")
     if deep:
         async def count() -> None:
             t = time.perf_counter()
@@ -205,7 +244,22 @@ async def health(deep: bool = Query(False, description="Call every upstream now 
             except UpstreamError as exc:
                 body["overture"]["error"] = exc.message
 
-        await asyncio.gather(count(), up.ping(), *([release()] if ov else []))
+        async def intl(service: str, url: str, params: dict) -> None:
+            try:
+                await up._get_json(service, url, params, cache=False)  # records the outcome in up.status
+            except UpstreamError:
+                pass
+
+        _deep["lock"] = _deep["lock"] or asyncio.Lock()
+        async with _deep["lock"]:  # concurrent callers share one round of probes
+            age = time.monotonic() - _deep["at"]
+            if age < DEEP_EVERY_S:
+                body.update(_deep["body"], deep_age_s=round(age))
+            else:
+                await asyncio.gather(count(), up.ping(), *([release()] if ov else []),
+                                     *(intl(s, u, p) for s, (u, p) in INTL_PROBES.items()))
+                _deep["at"] = time.monotonic()
+                _deep["body"] = {k: body[k] for k in ("nad_point_count", "nad_latency_ms", "nad_error") if k in body}
     now = time.time()
     seen = {**up.status, **({"overture": ov.status} if ov and ov.status else {})}
     view = lambda v: {"ok": v["ok"], "error": v["error"], "ago_s": round(now - v["at"])}  # noqa: E731
@@ -220,7 +274,8 @@ async def health(deep: bool = Query(False, description="Call every upstream now 
     return body
 
 
-@app.get("/countries", tags=["meta"], summary="Countries that can be verified and their data sources")
+@app.get("/countries", tags=["meta"], response_model=list[CountryInfo],
+         summary="Countries that can be verified and their data sources")
 async def countries():
     """`providers` in the order they are asked: the first that answers decides; the next only when it fails (or,
     for Overture, has no data around the address)."""
@@ -244,6 +299,8 @@ async def verify_get(
     zip: str | None = Query(None, max_length=20, alias="zip", description="ZIP, or the postcode outside the US"),
     country: str | None = Query(None, max_length=60, description="ISO code or name; default: named at the end of the "
                                                                  "address, Japanese text -> JP, else US"),
+    default_country: str | None = Query(None, max_length=60, description="Used when neither `country` nor the "
+                                                                         "address names one (instead of the US)"),
     lat: float | None = Query(None, ge=-90, le=90),
     lon: float | None = Query(None, ge=-180, le=180),
     zip_fallback: bool = Query(False),
@@ -252,8 +309,8 @@ async def verify_get(
 ):
     try:
         req = VerifyRequest(address=address, street=street, unit=unit, city=city, state=state, zip=zip,
-                            country=country, lat=lat, lon=lon, zip_fallback=zip_fallback, overture_fallback=overture_fallback,
-                            max_candidates=max_candidates)
+                            country=country, default_country=default_country, lat=lat, lon=lon, zip_fallback=zip_fallback,
+                            overture_fallback=overture_fallback, max_candidates=max_candidates)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return await _run_verify(req)

@@ -64,7 +64,26 @@ INTL = [
     ({"address": "東京都新宿区西新宿2-99-1"}, "street_only", "jp_gsi"),
     ({"address": "2-8-1 Nishi-Shinjuku, Shinjuku-ku, Tokyo 163-8001, Japan"}, "verified", "jp_gsi"),
 ]
-CASES += INTL
+# Inputs a review turned up: each was answered wrongly once.
+REGRESSIONS = [
+    ({"address": "25 Dorrance St, Providence, Rhode Island"}, "verified", "nad"),  # not Iceland
+    ({"address": "1700 W Washington St, Phoenix, AZ 85007（周末都在家，可放小区门口）"}, "verified", "nad"),  # not Japan
+    ({"address": "Karl Johans gate 22, Bergen", "country": "NO"}, "not_found", "no_kartverket"),  # the number is in Oslo
+    ({"address": "náměstí Míru 9, Praha 2", "country": "CZ"}, "verified", "cz_ruian"),  # a district, not a postcode
+    ({"address": "Calle Mayor 5, 28013 Madrid", "country": "ES"}, "verified", "es_cartociudad"),  # really 28012
+    ({"address": "Stephansplatz 1, 1010 Vienna", "country": "AT"}, "verified", "at_bev"),  # English town name
+    ({"address": "Przybysławice 12, 32-046 Przybysławice", "country": "PL"}, "verified", "pl_gugik"),  # a village without streets
+    ({"address": "Markt 7, 99423 Weimar", "country": "DE"}, "street_only", "overture"),  # not Marktstraße 7
+    ({"address": "1-2-3 Wakabayashi, Setagaya-ku, Tokyo 160-0023, Japan"}, "verified", "jp_gsi"),  # postcode of 西新宿
+    ({"address": "本町1-1-1, 中央区, 大阪府"}, "verified", "jp_gsi"),  # not the first 本町 in Japan
+    ({"address": "中央1-1-1", "country": "JP"}, "geocode_failed", "jp_gsi"),  # dozens of 中央 towns
+    # a US row without a state, a katakana name in the unit: still the US
+    ({"street": "1700 W Washington St", "unit": "タナカ様", "city": "Phoenix", "zip": "85007"}, "verified", "nad"),
+    ({"address": "1700 W Washington St, Phoenix, AZ 85007", "default_country": "JP"}, "verified", "nad"),  # state + ZIP win
+    ({"address": "Unter den Linden 77, Berlin Germany"}, "verified", "overture"),  # the country after the town, no postcode
+    ({"address": "京都市北区金閣寺町1"}, "verified", "jp_gsi"),  # Kyoto without the prefecture
+]
+CASES += INTL + REGRESSIONS
 
 failed = 0
 with httpx.Client(timeout=90) as c:

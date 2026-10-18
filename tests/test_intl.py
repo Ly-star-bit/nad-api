@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.intl import countries as C
 from app.intl import europe, japan, osm
-from app.intl.match import decide, norm_num, norm_postcode, street_sim
+from app.intl.match import decide, norm_num, norm_postcode, num_matches, street_sim
 from app.intl.parse import parse_line
 from app.main import app
 
@@ -27,7 +27,7 @@ def test_country_in_address_line_never_takes_us_states():
     assert C.country_in_text("Unter den Linden 77, 10117 Berlin, Germany") == "DE"
     assert C.country_in_text("10117 Berlin Germany") == "DE"
     assert C.country_in_text("東京都新宿区西新宿2-8-1") == "JP"
-    assert C.country_in_text("123 Main St, Wilmington, DE 19801") is None   # Delaware, not Germany
+    assert C.country_in_text("123 Main St, Wilmington, DE 19801") == "US"   # Delaware + ZIP: the US, not Germany
     assert C.country_in_text("1 Peachtree St, Atlanta, Georgia") is None
     assert C.country_in_text("10 Main St, Baltimore, MD") is None           # Maryland, not Moldova
 
@@ -174,12 +174,15 @@ def test_latvia_skips_named_houses():
     assert [(x["street"], x["number"], x["city"]) for x in c] == [("Rātslaukums", "1", "Rīga")]
 
 
-def test_finland_range_contains_the_number():
-    a = parse_line("Pohjoisesplanadi 12, Helsinki", C.COUNTRIES["FI"])
+def test_finland_range_holds_one_side_of_the_street():
+    fi = C.COUNTRIES["FI"]
     data = {"features": [{"geometry": {"type": "Point", "coordinates": [24.95, 60.16]}, "properties": {
         "address_fin": "Pohjoisesplanadi 11-13", "address_name_fin": "Pohjoisesplanadi", "number_part_of_address_number": 11,
         "number_part_of_address_number2": 13, "postal_code": "00170", "postal_office_fin": "HELSINKI"}}]}
-    assert europe.fi_cands(data, a)[0]["number"] == "12"
+    a = parse_line("Pohjoisesplanadi 12, Helsinki", fi)
+    assert europe.fi_cands(data, a)[0]["number"] == "11-13"
+    assert num_matches(a, "11-13") is None                      # 12 is across the street
+    assert num_matches(parse_line("Pohjoisesplanadi 13, Helsinki", fi), "11-13") == "range"
 
 
 def test_photon_interpolation_counts_as_street():
@@ -215,8 +218,9 @@ def test_gsi_titles_and_places():
     assert japan.town_matches("新宿区西新宿", "東京都新宿区西新宿")
     assert japan.town_matches("北海道虻田郡ニセコ町字富士見", "北海道ニセコ町富士見")
     assert not japan.town_matches("東新宿", "東京都新宿区東五軒町")
-    assert japan._clean_town("西新宿（次のビルを除く）") == "西新宿"
-    assert japan._clean_town("以下に掲載がない場合") == ""
+    assert japan._clean_town("西新宿（次のビルを除く）") == ("西新宿", None)
+    assert japan._clean_town("大通西（２０〜２８丁目）") == ("大通西", (20, 28))
+    assert japan._clean_town("以下に掲載がない場合") == ("", None)
 
 
 def _jp(text, title, chome_town=None):

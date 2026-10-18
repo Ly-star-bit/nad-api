@@ -3,15 +3,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import re
 import time
 from typing import Any
 
+from .. import config
 from ..upstream import UpstreamError
 from . import europe, japan, osm
 from .base import Ctx, Lookup, ProviderInfo, Skip, record
 from .countries import COUNTRIES
-from .match import decide, score
+from .match import decide, score, street_parts
 from .parse import IntlAddress, parse_line, parse_structured
+from .places import local_city
 
 PROVIDERS = {
     "fr_ban": europe.fr_ban,
@@ -34,6 +39,33 @@ PROVIDERS = {
 }
 INFO: dict[str, ProviderInfo] = {**europe.INFO, **osm.INFO, **japan.INFO}
 
+log = logging.getLogger(__name__)
+
+# One cheap query with a known answer per source, for /health?deep=true: a register that moved its API, or one that
+# blocks the server's IP, shows up there instead of as failed addresses.
+PROBES: dict[str, tuple[str, dict]] = {
+    "fr_ban": (config.FR_BAN_URL, {"q": "8 Boulevard du Port 80000 Amiens", "limit": 1}),
+    "nl_pdok": (config.NL_PDOK_URL, {"q": "Damrak 1 Amsterdam", "rows": 1}),
+    "be_vlaanderen": (config.BE_VL_GEO_URL, {"q": "Grote Markt 1, 2000 Antwerpen", "c": 1}),
+    "be_wallonie": (config.BE_WA_URL, {"address": "Place du Marché 2, 4000 Liège", "crs": "EPSG:4326"}),
+    "lu_geoportail": (config.LU_URL, {"queryString": "42 Place Guillaume II 1648 Luxembourg"}),
+    "ch_geoadmin": (config.CH_URL, {"type": "locations", "origins": "address", "limit": 1, "searchText": "Bundesplatz 3 3011 Bern"}),
+    "at_bev": (config.AT_URL, {"term": "1010 Wien Rathausplatz 1"}),
+    "es_cartociudad": (config.ES_URL, {"q": "Plaza de Cibeles 1 Madrid", "limit": 1, "no_process": "callejero"}),
+    "no_kartverket": (config.NO_URL, {"adressenavn": "Karl Johans gate", "nummer": 22, "treffPerSide": 1}),
+    "fi_ryhti": (config.FI_URL, {"f": "json", "limit": 1}),
+    "is_hms": (config.IS_URL, {"service": "WFS", "version": "2.0.0", "request": "GetFeature", "typeNames": "public:Stadfangaskra",
+                               "outputFormat": "application/json", "count": 1}),
+    "ee_inads": (config.EE_URL, {"address": "Raekoja plats 1, Tallinn", "results": 1}),
+    "lv_vzd": (config.LV_URL, {"resource_id": config.LV_RESOURCE, "limit": 1}),
+    "pl_gugik": (config.PL_URL, {"request": "GetAddress", "address": "Warszawa, Marszałkowska 99A", "srid": "4326"}),
+    "cz_ruian": (config.CZ_URL, {"SingleLine": "Mariánské náměstí 2, Praha", "maxLocations": 1, "f": "json"}),
+    "si_gurs": (config.SI_URL, {"f": "application/geo+json", "limit": 1}),
+    "jp_gsi": (config.GSI_URL, {"q": "東京都千代田区丸の内一丁目"}),
+    "photon": (f"{config.PHOTON_URL}/api", {"q": "Berlin", "limit": 1}),
+    "postcodes_io": (f"{config.POSTCODES_IO_URL}/postcodes/SW1A2AA", {}),
+}
+
 DISCLAIMER = ("Checks that the address exists in the country's address register (or, where none is open, in "
               "Overture Maps / OpenStreetMap); it does not confirm that the post office delivers there.")
 
@@ -55,11 +87,27 @@ def _base(country: str, raw: str) -> dict[str, Any]:
 
 async def verify_intl(ctx: Ctx, jpost: japan.JapanPost | None, country: str, *, address: str | None = None,
                       street: str | None = None, city: str | None = None, postcode: str | None = None,
-                      unit: str | None = None, overture_fallback: bool = True, max_candidates: int = 5) -> dict[str, Any]:
+                      unit: str | None = None, state: str | None = None, overture_fallback: bool = True,
+                      max_candidates: int = 5) -> dict[str, Any]:
     t0 = time.perf_counter()
+    try:
+        async with asyncio.timeout(config.INTL_TIMEOUT_S):
+            out = await _verify(ctx, jpost, country, address, street, city, postcode, unit, state, max_candidates)
+    except TimeoutError:
+        out = _base(country, address or ", ".join(p for p in (street, unit, postcode, city) if p))
+        out["status"] = "upstream_error"
+        out["notes"].append(f"this country's sources gave no answer within {config.INTL_TIMEOUT_S:.0f} s")
+    out["timing_ms"]["total"] = round((time.perf_counter() - t0) * 1000, 1)
+    return out
+
+
+async def _verify(ctx: Ctx, jpost: japan.JapanPost | None, country: str, address: str | None, street: str | None,
+                  city: str | None, postcode: str | None, unit: str | None, state: str | None,
+                  max_candidates: int) -> dict[str, Any]:
     if country == "JP":
-        text = address or ", ".join(p for p in (postcode, city, street, unit) if p)
-        out = await _japan(ctx, jpost, text)
+        # the prefecture, city and postcode fields only help pick the place: GSI is asked for the line itself
+        text = address or ", ".join(p for p in (street, unit, city) if p)
+        out = await _japan(ctx, jpost, text, state=state, postcode=postcode, city=city if address else None)
     else:
         c = COUNTRIES[country]
         a = parse_line(address, c) if address and not street else parse_structured(c, street or "", city or "",
@@ -68,13 +116,41 @@ async def verify_intl(ctx: Ctx, jpost: japan.JapanPost | None, country: str, *, 
             a.postcode = a.postcode or (postcode or "").strip().upper()
             a.city = a.city or (city or "").strip()
             a.unit = a.unit or (unit or "").strip()
-        out = await _europe(ctx, a, c.providers, overture_fallback, max_candidates)
-    out["timing_ms"]["total"] = round((time.perf_counter() - t0) * 1000, 1)
+        if a.city and (local := local_city(a.city, country)) != a.city:  # "Vienna" is searched as Wien
+            a.warnings.append(f"town '{a.city}' read as {local}")
+            a.city = local
+        out = await _europe(ctx, a, c.providers, max_candidates)
     return out
 
 
-async def _europe(ctx: Ctx, a: IntlAddress, providers: tuple[str, ...], overture_fallback: bool,
-                  max_candidates: int) -> dict[str, Any]:
+# how good an answer is, to keep the best when a later source is asked too
+_RANK = {"verified": 0, "unit_not_found": 0, "street_only": 1, "not_found": 2, "not_covered": 3, "geocode_failed": 4,
+         "invalid_input": 4, "upstream_error": 5}
+# Where a named house, farm or townland without a number is a normal address: a "street" without a street word is
+# then such a name ("Rose Cottage", "Hvammur", "Ozoli", "Mäe talu"); in the British Isles the name is often a line of
+# its own above the street ("Rose Cottage, High Street"). A French lieu-dit is one anywhere, and so is a hamlet, farm
+# or estate written with its language's word for one ("Località Valle", "Le Bourg", "Lugar de Outeiro", "Gut Hohenholz";
+# not "Hofstraße" or "Rue du Bourg"). A bare word is no name ("Hof, 95028" is the town Hof), but "Le Bourg" is one.
+_HOUSE_NAMES = {"GB", "IE", "IM", "JE", "GG", "IS", "FO", "NO", "SE", "FI", "AX", "DK", "EE", "LV", "LT"}
+_HOUSE_NAME_LINE = {"GB", "IE", "IM", "JE", "GG"}
+_NAMED_PLACE_RE = re.compile(r"(?i)lieu[\s-]?dit\b")
+_RURAL = {"it": r"localit[àa]|loc\.?|frazione|fraz\.?|contrada|c\.da|podere|cascina|masseria",
+          "fr": r"le\s+bourg|hameau|domaine|la\s+grange|les\s+granges",
+          "es": r"lugar|paraje|diseminados?|partida|caser[íi]o|cortijo",
+          "pt": r"lugar|quinta|casal|herdade",
+          "de": r"gut|hof|gutshof|einzelhof"}
+_RURAL_LANGS = {"IT": "it", "SM": "it", "VA": "it", "FR": "fr", "MC": "fr", "BE": "fr", "LU": "fr", "ES": "es",
+                "AD": "es", "PT": "pt", "DE": "de", "AT": "de", "LI": "de", "CH": "de fr it"}
+_RURAL_RE = {cc: re.compile(rf"(?i)(?:{'|'.join(_RURAL[x] for x in langs.split())})"
+                            r"(?:(?<=\.)\s*\S|\s+\S|(?<=bourg)$|(?<=grange)$|(?<=granges)$)")
+             for cc, langs in _RURAL_LANGS.items()}
+
+
+async def _europe(ctx: Ctx, a: IntlAddress, providers: tuple[str, ...], max_candidates: int) -> dict[str, Any]:
+    """Ask the country's sources in order. The next one is asked when a source is down or skips the address, when
+    Overture has no data around it (Bavaria), or when an official register finds nothing at all - a spelling it
+    can't read ('Mustamae tee' for Mustamäe tee) - in which case its answer still stands unless the next does better.
+    (`overture_fallback` is a US option: here Overture is a primary source, so only OVERTURE_ENABLED=0 drops it.)"""
     out = _base(a.country, a.raw)
     out["parsed"] = {"house_number": a.number or None, "street": a.street or None, "unit": a.unit or None,
                      "city": a.city or None, "state": None, "zip": a.postcode or None}
@@ -82,11 +158,25 @@ async def _europe(ctx: Ctx, a: IntlAddress, providers: tuple[str, ...], overture
     if a.extra:
         out["notes"].append(f"not used for matching: {'; '.join(a.extra)}")
     if not a.number:
-        out["status"] = "invalid_input"
+        named = a.street and (_NAMED_PLACE_RE.match(a.street) or (a.country in _RURAL_RE and _RURAL_RE[a.country].match(a.street))
+                              or (a.country in _HOUSE_NAME_LINE and bool(a.extra))
+                              or (a.country in _HOUSE_NAMES and not street_parts(a.street)[1]))
+        if not a.po_box and (a.no_number or (named and (a.postcode or a.city))):
+            # a house name, "s/n", a farm: real addresses, but the registers are searched by number (a street
+            # with its number left out is not one of these: "Hauptstraße, 80331 München" is invalid_input)
+            out["status"] = "not_covered"
+            out["notes"].append("without a house number the address can't be checked against the register "
+                                "(house names, 's/n' and rural addresses are not searchable)")
+        else:
+            out["status"] = "invalid_input"
         return out
-    chain = [p for p in providers if p != "overture" or (overture_fallback and ctx.ov is not None)]
-    skipped: list[tuple[str, str]] = []  # (provider, why: upstream_error / not_covered)
-    kept: dict[str, Any] | None = None   # a not_covered answer, used if nothing after it answers
+    chain = [p for p in providers if p != "overture" or ctx.ov is not None]
+    if len(chain) < len(providers):
+        out["notes"].append("Overture Maps is turned off on this server (OVERTURE_ENABLED=0)")
+    skipped: list[tuple[str, str]] = []  # (provider, why: upstream_error / not_covered / not_found)
+    kept: dict[str, Any] | None = None   # an answer a later source may still improve on
+    kept_rank = 99
+    register_empty = False  # an official register found nothing: a later source must have the exact street name
     for key in chain:
         try:
             lk: Lookup = await PROVIDERS[key](ctx, a)
@@ -97,19 +187,44 @@ async def _europe(ctx: Ctx, a: IntlAddress, providers: tuple[str, ...], overture
             skipped.append((key, "upstream_error"))
             out["notes"].append(f"{INFO[key].name} unavailable: {exc.message}")
             continue
+        except Exception as exc:  # an answer in a shape the reader doesn't know: the same as an outage
+            log.exception("%s failed for %r", key, a.raw)
+            skipped.append((key, "upstream_error"))
+            out["notes"].append(f"{INFO[key].name} gave an answer that could not be read ({type(exc).__name__})")
+            continue
         res = _apply(dict(out, notes=list(out["notes"]), timing_ms=dict(out["timing_ms"])), key, lk, a, max_candidates)
         if skipped:
             res["fallback"] = {"provider": key, "release": None, "triggered_by": skipped[-1][1], "status": res["status"],
                                "adopted": True, "error": "; ".join(f"{INFO[k].name}: {why}" for k, why in skipped)}
-        if lk.area_empty and res["status"] == "not_covered" and key != chain[-1]:
-            # e.g. Bavaria, missing from Overture's German data: ask the next source instead
+        if register_empty and res["verified"] and res["best_match"]["match"]["street_score"] < 0.999:
+            # a similar name there is another street ('Grote Markt 1, 9000 Gent' is not in the register; Overture's
+            # 'Groentenmarkt 1' is another square): the register's answer stands, with these only shown
+            seen = {c["formatted"] for c in kept["candidates"]}
+            for c in (res["best_match"], *res["candidates"]):
+                if c["formatted"] not in seen and len(kept["candidates"]) < max_candidates:
+                    seen.add(c["formatted"])
+                    kept["candidates"].append(c)
+            out["notes"].append(f"{INFO[key].name} has only a similar street name ({res['best_match']['formatted']}), "
+                                "not taken as this address")
+            continue
+        rank = 6 if lk.area_empty and res["status"] == "not_covered" else _RANK.get(res["status"], 5)
+        if kept is not None and rank >= kept_rank:
+            out["notes"].append(f"{INFO[key].name} could not do better ({res['status']})")
+            continue
+        kept, kept_rank = res, rank
+        last = key == chain[-1]
+        if rank == 6 and not last:  # e.g. Bavaria, missing from Overture's German data
             skipped.append((key, "not_covered"))
             out["notes"].append(f"{INFO[key].name} has no addresses around this location; trying the next source")
-            kept = kept or res
+            continue
+        if (INFO[key].authority == "official" and res["status"] == "not_found" and not lk.cands and not last):
+            skipped.append((key, "not_found"))
+            register_empty = True
+            out["notes"].append(f"{INFO[key].name} found nothing at all for this address; trying the next source")
             continue
         return res
     if kept:
-        kept["notes"] = out["notes"]
+        kept["notes"] = kept["notes"] + [n for n in out["notes"] if n not in kept["notes"]]
         return kept
     out["status"] = "upstream_error"
     return out
@@ -118,6 +233,8 @@ async def _europe(ctx: Ctx, a: IntlAddress, providers: tuple[str, ...], overture
 def _apply(out: dict[str, Any], key: str, lk: Lookup, a: IntlAddress, max_candidates: int) -> dict[str, Any]:
     view = lk.view or a
     out["provider"], out["data_source"] = _provider(key), key
+    if lk.credit:
+        out["provider"]["attribution"] = "; ".join(x for x in (out["provider"]["attribution"], lk.credit) if x)
     out["notes"] += lk.notes
     out["timing_ms"].update(lk.timing)
     if lk.geocode:
@@ -127,27 +244,39 @@ def _apply(out: dict[str, Any], key: str, lk: Lookup, a: IntlAddress, max_candid
         out["candidates"] = [record(score(view, c)) for c in lk.cands if c["kind"] == "address"][:max_candidates]
         return out
     d = decide(view, lk.cands, authority=INFO[key].authority, dataset=INFO[key].name, unit_support=lk.unit_support,
-               street_found=lk.street_found, area_empty=lk.area_empty, max_candidates=max_candidates)
+               street_found=lk.street_found, area_empty=lk.area_empty, max_candidates=max_candidates,
+               incomplete=lk.incomplete)
     out.update(status=d["status"], verified=d["verified"], match_level=d["match_level"], confidence=d["confidence"],
                best_match=record(d["best_match"]) if d["best_match"] else None,
                candidates=[record(c) for c in d["candidates"]], suggestions=[record(c) for c in d["suggestions"]])
+    bm = d["best_match"]
+    if bm and not bm.get("postcode") and bm.get("area_postcode"):  # an Overture row without one: OSM's house postcode
+        d["notes"] = [n.replace(f" vs {INFO[key].name} ", " vs OpenStreetMap ", 1) if n.startswith("postcode differs")
+                      else n for n in d["notes"]]
     out["notes"] += d["notes"]
     return out
 
 
-async def _japan(ctx: Ctx, jpost: japan.JapanPost | None, text: str) -> dict[str, Any]:
+async def _japan(ctx: Ctx, jpost: japan.JapanPost | None, text: str, **hints: str | None) -> dict[str, Any]:
     out = _base("JP", text)
     out["provider"], out["data_source"] = _provider("jp_gsi"), "jp_gsi"
     try:
-        r = await japan.verify_jp(ctx, jpost, text)
+        r = await japan.verify_jp(ctx, jpost, text, **hints)
     except UpstreamError as exc:
         out["status"] = "upstream_error"
         out["data_source"] = None
         out["notes"].append(f"国土地理院 address search unavailable: {exc.message}")
         return out
+    except Exception as exc:  # an answer in a shape the reader doesn't know
+        log.exception("jp_gsi failed for %r", text)
+        out["status"] = "upstream_error"
+        out["data_source"] = None
+        out["notes"].append(f"国土地理院 gave an answer that could not be read ({type(exc).__name__})")
+        return out
     a: japan.JpAddress = r["jp"]
     out["parsed"] = {"house_number": a.number or None, "street": a.prefix or None, "unit": a.rest or None,
-                     "city": None, "state": None, "zip": a.postcode or None}
+                     "city": "、".join(a.hints) or None, "state": "、".join(a.prefer) or None,
+                     "zip": a.postcode or None}
     out["notes"] += r["notes"]
     out["timing_ms"].update(r["timing"])
     out["geocode"] = r["geocode"]
@@ -167,6 +296,7 @@ async def _japan(ctx: Ctx, jpost: japan.JapanPost | None, text: str) -> dict[str
                   "number_exact": True if level == "address" else None, "zip_match": r["zip_match"], "city_match": None,
                   "unit_match": None, "distance_m": None},
     }
+    out["jp"] = {"parcel": r.get("parcel"), "go_given": r.get("go_given")}
     if out["status"] in ("verified", "street_only"):
         out["best_match"] = best if out["status"] == "verified" else None
         out["match_level"] = level

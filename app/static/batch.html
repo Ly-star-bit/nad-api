@@ -147,7 +147,7 @@
     <input id="pick" type="file" accept=".csv,.tsv,.txt,text/csv,text/plain" hidden>
     <div class="opts">
       <label>没写国家的行按 <select id="cc" aria-label="默认国家"><option value="">自动识别</option></select></label>
-      <label><input id="ov" type="checkbox" checked>NAD 查不到时用 Overture 补查</label>
+      <label><input id="ov" type="checkbox" checked>美国：NAD 查不到时用 Overture 补查</label>
       <label><input id="zf" type="checkbox">定位失败时按 ZIP 范围搜索（较慢）</label>
     </div>
     <div id="keyrow" class="keyrow" hidden>
@@ -165,9 +165,9 @@
 </div>
 
 <script type="module">
-import { STATUS, SOURCE, esc, pct, setupKey, describeHttpError, showHealth, zipMismatch, zipWord, verdictLabel,
+import { STATUS, SOURCE, sourceName, esc, pct, setupKey, describeHttpError, showHealth, zipMismatch, zipWord, verdictLabel,
   loadCountries } from './static/common.js';
-import { createMap, fit, colors, resultPoint } from './static/map.js';
+import { createMap, fit, colors, resultPoint, pointOf } from './static/map.js';
 
 const MAX_ROWS = 500;
 // Addresses per /v1/verify/batch call, one call in flight. The server works on 5 at a time and streams each result
@@ -203,20 +203,28 @@ const SAMPLE = [
 
 // Header names we recognise, after lower-casing and dropping spaces and _ - . : # / ( )
 const HEADERS = {
-  address: ['address', 'fulladdress', 'addr', 'singlelineaddress', 'completeaddress', '地址', '完整地址', '详细地址'],
+  address: ['address', 'fulladdress', 'addr', 'singlelineaddress', 'completeaddress', '地址', '完整地址', '详细地址', '目的地址'],
   street: ['street', 'streetaddress', 'address1', 'addressline1', 'addr1', 'line1', 'street1', '街道', '街道地址', '地址1', '地址行1'],
   unit: ['unit', 'address2', 'addressline2', 'addr2', 'line2', 'apt', 'suite', 'apartment', 'aptsuite', '单元', '单元号', '地址2', '地址行2', '房间号'],
   city: ['city', 'town', 'cityname', '城市', '市'],
   state: ['state', 'st', 'province', 'stateprovince', 'stateorprovince', 'statecode', 'region', '州', '省', '州省', '省州'],
-  zip: ['zip', 'zipcode', 'zip5', 'postal', 'postalcode', 'postcode', 'zippostalcode', '邮编', '邮政编码'],
-  country: ['country', 'countrycode', 'countryregion', 'countryname', 'nation', '国家', '国家地区', '国家或地区', '国别'],
+  zip: ['zip', 'zipcode', 'zip5', 'postal', 'postalcode', 'postcode', 'zippostalcode', '邮编', '邮政编码', '邮递区号'],
+  country: ['country', 'countrycode', 'countryregion', 'countryname', 'countryiso', 'countryiso2', 'countryiso3', 'iso', 'isocode',
+    'iso2', 'iso3', 'nation', '国家', '国家地区', '国家或地区', '国别', '国家代码', '国家二字码', '国家简码', '国家编码',
+    '国家地区代码', '国家或地区代码', '目的国', '目的国家', '目的地国家', '国家名称'],
 };
-// Order and shipping exports put a prefix on the same columns: "Shipping Address 1", "Ship City", "收件人地址"
-const HEAD_PREFIX = /^(shipto|shipping|ship|recipient|receiver|consignee|delivery|mailing|customer|收件人|收货人|收件|收货|寄送|配送)/;
+const US_STATES = /^(A[LKZRASEP]|C[AOT]|D[EC]|FL|G[AU]|HI|I[DLNA]|K[SY]|LA|M[EDAINSOTP]|N[EVHJMYCD]|O[HKR]|P[AR]|RI|S[CD]|T[NX]|UT|V[TAI]|W[AVIY])$/i;
+// Order and shipping exports put a prefix on the same columns: "Shipping Address 1", "Ship City", "收件人地址".
+// The delivery columns win over unprefixed ones, and those over the buyer's own address (eBay has both).
+const SHIP_PREFIX = /^(shipto|shipping|ship|recipient|receiver|consignee|delivery|destination|dest|收件人|收货人|收件|收货|寄送|配送|目的地|目的)/;
+const OTHER_PREFIX = /^(buyer|mailing|customer)/;
 
 // ------------------------------------------------------------------ parsing
 
-const normHead = (s) => s.toLowerCase().replace(/[\s_.\-:#/()（）]/g, '');
+// Taiwan's exports use traditional characters (國家, 郵遞區號): folded to the simplified ones above
+const TRAD = { 國: '国', 區: '区', 郵: '邮', 遞: '递', 編: '编', 碼: '码', 號: '号', 單: '单', 詳: '详', 細: '细', 縣: '县', 鄉: '乡',
+  貨: '货', 稱: '称', 處: '处', 戶: '户', 門: '门', 樓: '楼', 層: '层', 個: '个' };
+const normHead = (s) => s.toLowerCase().replace(/[\s_.\-:#/()（）]/g, '').replace(/[國區郵遞編碼號單詳細縣鄉貨稱處戶門樓層個]/g, (c) => TRAD[c]);
 
 function parsePaste(s) {
   // Comma is never a delimiter here: one-line addresses are full of them. Tabs come from Excel, which also
@@ -260,18 +268,24 @@ function joinCells(cells) {
     (i === 0 ? c : s + (/^\d{3,5}(-\d{4})?$/.test(c) && /^[A-Za-z]{2}$/.test(a[i - 1]) ? ' ' : ', ') + c), '');
 }
 
+// The codes /countries lists (filled once it has loaded; until then no column is read as countries)
+let COUNTRIES = new Set();
+
 const oneLine = (f) => [[f.street, f.unit].filter(Boolean).join(' '), f.city, [f.state, f.zip].filter(Boolean).join(' '), f.country]
   .filter(Boolean).join(', ');
 
 // table (array of rows of cells) -> { header, rows: [{ cells, req, input }], total, info, bad }
-function buildSource(table) {
+function buildSource(table, picked = '') {
   table = table.map((r) => r.map((c) => (c || '').trim())).filter((r) => r.some(Boolean));
   if (!table.length) return { header: [], rows: [], total: 0, info: '' };
 
-  const map = {};
+  const map = {}, rank = {};
   table[0].forEach((c, i) => {
-    const h = normHead(c), bare = h.replace(HEAD_PREFIX, '');
-    for (const [k, names] of Object.entries(HEADERS)) if (!(k in map) && (names.includes(h) || names.includes(bare))) map[k] = i;
+    const h = normHead(c), ship = h.replace(SHIP_PREFIX, ''), other = h.replace(OTHER_PREFIX, '');
+    for (const [k, names] of Object.entries(HEADERS)) {
+      const r = ship !== h && names.includes(ship) ? 0 : names.includes(h) ? 1 : other !== h && names.includes(other) ? 2 : -1;
+      if (r >= 0 && (!(k in map) || r < rank[k])) { map[k] = i; rank[k] = r; }
+    }
   });
   const hasHeader = Object.keys(map).length > 0;
   const data = hasHeader ? table.slice(1) : table;
@@ -282,6 +296,15 @@ function buildSource(table) {
   const name = (k) => table[0][map[k]];
 
   let info, make;
+  if (hasHeader && width > 1 && Object.keys(map).every((k) => k === 'country')) {
+    // only the country column has a known name: the others together are the address
+    info = `没有识别到地址列的表头，${name('country')} 以外的各列已合并成一行地址`;
+    make = (r) => {
+      const a = joinCells(r.filter((_, i) => i !== map.country)), c = col(r, 'country');
+      return { req: a ? (c ? { address: a, country: c } : { address: a }) : null, input: a, q: a, country: c };
+    };
+    return { header, rows: data.slice(0, MAX_ROWS).map((cells) => ({ cells, ...make(cells) })), total: data.length, info };
+  }
   if (hasHeader && !('street' in map) && !('address' in map)) {
     return { header, rows: [], total: data.length, bad: true, info: '表头里没有地址列：需要 address，或者 street（可配合 city / state / zip）' };
   }
@@ -305,11 +328,26 @@ function buildSource(table) {
   } else if (width === 1) {
     info = '每行一个地址';
     make = (r) => ({ req: r[0] ? { address: r[0] } : null, input: r[0] });
+  } else if (!picked && data.every((r) => !r[width - 1] || COUNTRIES.has(r[width - 1].toUpperCase()))
+             && data.some((r) => r[width - 1] && !US_STATES.test(r[width - 1]))) {
+    // "Damrak 1 | 1012 LG Amsterdam | NL": a last column holding only codes of countries we cover reads as the
+    // country. A headerless column can also be a flag or a province (No, SI, FI for Firenze), so each row sends its
+    // code as that row's default only: a US state + ZIP or a country written in the line still wins on the server.
+    // A code that is also a US state (DE, MT, AL…) stays in the line, and a default picked below turns this off.
+    info = '没有识别到表头：最后一列按国家代码处理（只在地址本身看不出国家时才用）；如果这一列其实是省份或别的代码，请在下方选默认国家';
+    make = (r) => {
+      const c = (r[width - 1] || '').toUpperCase(), rest = r.slice(0, width - 1);
+      if (!c || US_STATES.test(c)) { const a = joinCells(r); return { req: a ? { address: a } : null, input: a }; }
+      const a = joinCells(rest);
+      return { req: a ? { address: a, default_country: c } : null, input: a, q: a, country: c };
+    };
   } else {
     info = '没有识别到表头，各列已合并成一行地址';
     make = (r) => { const a = joinCells(r); return { req: a ? { address: a } : null, input: a }; };
   }
-  return { header, rows: data.slice(0, MAX_ROWS).map((cells) => ({ cells, ...make(cells) })), total: data.length, info };
+  const rows = data.slice(0, MAX_ROWS).map((cells) => ({ cells, ...make(cells) }));
+  if (!hasHeader && width > 1 && !rows.some((r) => r.country)) info = '没有识别到表头，各列已合并成一行地址';
+  return { header, rows, total: data.length, info };
 }
 
 // ------------------------------------------------------------------ input box
@@ -318,7 +356,7 @@ let file = null;  // { name, table } once a CSV is loaded; null = textarea
 let src = buildSource([]);
 
 function refresh() {
-  src = buildSource(file ? file.table : parsePaste(text.value));
+  src = buildSource(file ? file.table : parsePaste(text.value), cc.value);
   if (src.bad) meta.innerHTML = `<span class="w">${esc(src.info)}</span>`;
   else if (!src.rows.length) meta.textContent = file ? '文件里没有数据行' : '还没有地址';
   else {
@@ -363,7 +401,15 @@ let notice = null;   // { title, msg } shown above the results when a run had to
 let chunkSize = CHUNK;
 
 const bucket = (r) => (r.state !== 'done' ? 'pending' : r.result ? r.result.status : 'error');
-const retryable = (r) => r.req && r.state === 'done' && (!r.result || r.result.status === 'upstream_error');
+// a row the server refused (422: an unsupported country, an unreadable request) would only fail again
+// The server's field limits (app/models.py): one over-long cell would get the whole chunk of 20 refused, so such a row
+// is marked here and never sent.
+const LIMITS = { address: 300, street: 200, unit: 50, city: 100, state: 50, zip: 20, country: 60 };
+const tooLong = (req) => {
+  const f = req && Object.keys(LIMITS).find((k) => (req[k] || '').length > LIMITS[k]);
+  return f ? `${f} 超过 ${LIMITS[f]} 个字符，请删减后再校验` : null;
+};
+const retryable = (r) => r.req && !tooLong(r.req) && r.state === 'done' && (r.result ? r.result.status === 'upstream_error' : !/^4\d\d\b/.test(r.error || ''));
 
 function startRun() {
   refresh();
@@ -371,10 +417,12 @@ function startRun() {
   run = {
     name: file ? file.name : null,
     header: src.header,
-    rows: src.rows.map((r, i) => ({
-      ...r, n: i + 1, state: r.req ? 'pending' : 'done', result: null, error: r.req ? null : MISSING,
-    })),
+    rows: src.rows.map((r, i) => {
+      const error = r.req ? tooLong(r.req) : MISSING;
+      return { ...r, n: i + 1, state: error ? 'done' : 'pending', result: null, error };
+    }),
     activeMs: 0, segStart: 0, netDone: 0, saved: true,
+    defaultCountry: cc.value,  // the default at the start: changing the picker later doesn't move finished rows
   };
   dirty = false;
   filter = 'all';
@@ -396,7 +444,8 @@ async function pump() {
       chunk.forEach((r) => { r.state = 'running'; r.owner = me; });
       render();
       const opts = { overture_fallback: ov.checked, zip_fallback: zf.checked };
-      const withCountry = (req) => (req.country || !cc.value ? req : { ...req, country: cc.value });
+      // the default applies only where neither a country column nor the address itself names a country
+      const withCountry = (req) => (req.country || req.default_country || !R.defaultCountry ? req : { ...req, default_country: R.defaultCountry });
       const hadKey = key.has();
       const mine = (r) => r.owner === me && r.state === 'running';
       const land = (it) => {
@@ -586,8 +635,10 @@ function drawMarkers(shown) {
     if (r.state !== 'done') continue;
     if (resultPoint(r.result)) placed.push(r); else missing++;
   }
+  const nearby = placed.filter((r) => (pointOf(r.result) || {}).kind === 'nearby').length;
   out.querySelector('.map-key').innerHTML = `<span>地图上 ${placed.length} 个点</span>`
-    + (missing ? `<span>${missing} 行没有坐标（无法定位、无法解析或出错）</span>` : '')
+    + (nearby ? `<span>其中 ${nearby} 个没有匹配记录，圆点是同街最近的门牌</span>` : '')
+    + (missing ? `<span>${missing} 行没有点（未找到、无法定位、无法解析或出错）</span>` : '')
     + (placed.length ? '<span class="na">点圆点看详情</span>' : '');
   if (!bmap) return;
 
@@ -614,7 +665,8 @@ function popupHtml(r) {
   return `<div class="pop">
       <div class="pop-st t-${k.tone}"><span class="sq"></span>${esc(verdictLabel(x))}<span class="na">#${r.n}</span></div>
       <div class="pop-in">${esc(r.input)}</div>
-      ${bm ? `<div class="pop-m">${esc(bm.formatted)}</div>` : '<div class="pop-m na">没有匹配记录，圆点是定位点</div>'}
+      ${bm ? `<div class="pop-m">${esc(bm.formatted)}</div>`
+        : `<div class="pop-m na">没有匹配记录，圆点是${(pointOf(x) || {}).kind === 'nearby' ? '同街最近的门牌' : '定位点'}</div>`}
       <div class="pop-foot"><span>${x.data_source ? `${esc(sourceText(x))}，置信度 ${pct(x.confidence)}` : ''}</span>
         <a href="${esc(detailUrl(r))}" target="_blank" rel="noopener">详情 ↗</a></div>
     </div>`;
@@ -633,14 +685,14 @@ function rowHtml(r) {
       const zipFix = zipMismatch(x);
       m = [bm ? esc(bm.formatted) : near ? `<span class="na">最近门牌</span> ${esc(near.formatted)}` : '',
         zipFix ? `<span class="w">${zipWord(x)}不对，记录里是 ${esc(zipFix)}</span>` : '',
-        g.match_count > 1 ? `<span class="w">Census 找到 ${g.match_count} 个同名地址，只核对了第一个</span>` : '']
+        g.match_count > 1 ? `<span class="w">Census 找到 ${Number(g.match_count)} 个同名地址，只核对了第一个</span>` : '']
         .filter(Boolean).join('<br>') || '<span class="na">—</span>';
       from = esc(sourceText(x)) || '—';
       conf = x.data_source ? pct(x.confidence) : '—';
     } else {
-      m = `<span class="e">${esc(r.error)}</span>`;
+      m = `<span class="e">${esc((r.error || '').replace(/; supported: .*$/s, ''))}</span>`;  // not all 52 codes
     }
-    if (r.req) more = `<a href="${esc(detailUrl(r))}" target="_blank" rel="noopener">详情</a>`;
+    if (r.req && !tooLong(r.req)) more = `<a href="${esc(detailUrl(r))}" target="_blank" rel="noopener">详情</a>`;
   }
   const input = esc(r.input) + (r.unit ? ` <span class="na">${esc(r.unit)}</span>` : '');
   return `<tr${r.state === 'done' ? '' : ' class="wait"'}><td class="c-n">${r.n}</td>
@@ -650,13 +702,14 @@ function rowHtml(r) {
 
 // "NAD" for US rows; "DE · Overture", "JP · 国土地理院" for the rest
 function sourceText(x) {
-  const s = SOURCE[x.data_source] || x.data_source || '';
+  const s = sourceName(x);
   return x.country && x.country !== 'US' && s ? `${x.country} · ${s}` : s;
 }
 
 function detailUrl(r) {
   const p = new URLSearchParams({ q: r.q || r.input });
-  const c = (r.result && r.result.country !== 'US' && r.result.country) || (r.req && r.req.country) || cc.value;
+  // the country the row was checked in (the server's answer), else what was sent for it
+  const c = (r.result && r.result.country) || (r.req && (r.req.country || r.req.default_country)) || (run && run.defaultCountry) || '';
   if (c) p.set('country', c);
   if (zf.checked) p.set('zip_fallback', '1');
   if (!ov.checked) p.set('overture', '0');
@@ -688,7 +741,7 @@ setInterval(() => {
 
 const RESULT_COLS = ['verify_status', 'verify_verdict', 'verify_confidence', 'verify_country', 'verify_data_source', 'verify_matched_address',
   'verify_lat', 'verify_lon', 'verify_record_source', 'verify_nearest_number', 'verify_census_matches', 'verify_zip_should_be',
-  'verify_notes'];
+  'verify_notes', 'verify_license', 'verify_attribution'];
 
 // { excelText } is a value Excel must keep as text: a bare 02108 would open as the number 2108
 const excelText = (s) => (/^0\d/.test(s) ? { excelText: s } : s);
@@ -707,11 +760,14 @@ function csvCell(v) {
 function resultCells(r) {
   if (r.state !== 'done') return RESULT_COLS.map(() => '');
   const x = r.result;
-  if (!x) return ['error', '出错', '', '', '', '', '', '', '', '', '', '', r.error || ''];
+  if (!x) return ['error', '出错', '', '', '', '', '', '', '', '', '', '', r.error || '', '', ''];
   const bm = x.best_match || {}, near = !x.best_match && (x.suggestions || [])[0], g = x.geocode || {};
   return [x.status, verdictLabel(x), x.data_source ? x.confidence : '', x.country || 'US', x.data_source || '', bm.formatted || '',
     bm.lat ?? '', bm.lon ?? '', bm.source || '', near ? near.formatted : '', g.match_count > 1 ? g.match_count : '',
-    excelText(zipMismatch(x) || ''), (x.notes || []).join('; ')];
+    excelText(zipMismatch(x) || ''), (x.notes || []).join('; '),
+    // the record's own licence (an Overture row carries its source dataset's) before the provider's general one
+    bm.license || (x.provider && x.provider.license) || '',
+    (x.provider && x.provider.attribution) || (/^overture/.test(bm.source || x.data_source || '') ? 'Overture Maps Foundation' : '')];
 }
 
 function exportCsv() {
@@ -743,6 +799,7 @@ text.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); form.requestSubmit(); }
 });
 pick.addEventListener('change', () => { loadFile(pick.files[0]); pick.value = ''; });
+cc.addEventListener('change', changed);  // a picked default turns off reading a headerless code column
 
 box.addEventListener('dragover', (e) => {
   if (!e.dataTransfer.types.includes('Files')) return;
@@ -777,7 +834,7 @@ window.addEventListener('beforeunload', (e) => { if (active || (run && !run.save
 refresh();
 render();
 showHealth($('#health'));
-loadCountries(cc, '');
+loadCountries(cc, '').then((list) => { COUNTRIES = new Set(list.map((c) => c.code)); refresh(); });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);  // marker colours follow the scheme
 </script>
 </body>

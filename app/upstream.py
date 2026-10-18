@@ -82,6 +82,9 @@ class TTLCache:
         while len(self._data) > self.max_entries:
             self._data.popitem(last=False)
 
+    def pop(self, key: str) -> None:
+        self._data.pop(key, None)
+
     def __len__(self) -> int:
         return len(self._data)
 
@@ -102,9 +105,17 @@ class Upstream:
     async def aclose(self) -> None:
         await self.client.aclose()
 
+    @staticmethod
+    def _key(url: str, params: dict[str, Any]) -> str:
+        return url + "?" + json.dumps(params, sort_keys=True, default=str)
+
+    def forget(self, url: str, params: dict[str, Any]) -> None:
+        """Drop a cached answer that turned out to be unusable."""
+        self.cache.pop(self._key(url, params))
+
     async def _get_json(self, service: str, url: str, params: dict[str, Any], *, cache: bool = True) -> dict:
         """`cache=False` always asks the upstream (health checks); the answer is still cached for others."""
-        key = url + "?" + json.dumps(params, sort_keys=True, default=str)
+        key = self._key(url, params)
         if cache:
             cached = self.cache.get(key)
             if cached is not None:

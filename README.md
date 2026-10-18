@@ -71,53 +71,112 @@ OpenAddresses 里各县/市的原始数据，正好补上这些空白。实测�
 
 ## 欧洲和日本
 
-请求带 `country`（ISO 代码或国名，如 `DE`、`Germany`、`德国`），或者地址末尾写了国家名（`..., 10117 Berlin, Germany`），
-或者是日文地址时，按该国的数据源核对；都没有时按美国处理（地址末尾的 `DE`、`MD`、`Georgia` 是美国州，不会被当成国家）。
-`GET /countries` 列出支持的国家和各自的数据源。返回结构和美国一样，另带 `country` 和 `provider`
-（数据源名称、`authority`、许可证和需要展示的署名）。
+按什么国家核对，依次看：
+
+1. 请求里的 `country`：ISO 代码（`DE`、`DEU`）、常见写法（`UK`、`U.S.A.`、`EL`）、国名（`Germany`、`德国`、`義大利`、`Ελλάδα`）
+   或 ERP 导出的组合写法（`美国(US)`、`Germany (DE)`、`DE - Germany`，两部分必须一致），美国属地（`PR`、`GU`、`Puerto Rico`）
+   按美国；写成英国但邮编是 `JE` / `GY` / `IM` 的按泽西岛、根西岛、马恩岛；
+2. 地址里写的国家：末尾的国家名或单独一段的代码（`..., 10117 Berlin, Germany`、`..., London England`、`..., 75001 Paris, FR`、
+   `Berlin 德国`），国家后面跟着邮编、电话或括号备注也能识别，写在开头也可以（`Germany, 10117 Berlin, ...`）；
+   城市后面不加逗号的两字母代码不当国家（`50122 Firenze FI` 的 FI 是佛罗伦萨省，`3011 Bern BE` 的 BE 是伯尔尼州）；
+   日文地址（假名、都道府県、丁目，或 `大阪市北区梅田3-1-1`、`京都市北区金閣寺町1` 这种市区 + 町名 + 番地写法，简体字
+   `东京都`、`横滨市` 也算；`南京路1-1`、`科技园1-2-3` 这类中国地址不算），以及带 `-ku` / `chome` 的罗马字地址；
+3. 请求里的 `default_country`（批量页的“没写国家的行按”就是它）；但以美国州结尾的行（`..., Springfield, IL`）仍按美国，
+   除非行里同时有默认国家的邮编（`Via Roma 10, 20121 Milano MI` 的 MI 是米兰省）；默认国家是意大利时，
+   `Milano MI 20121` 这种“省份 + 邮编”只要邮编不可能是该州的 ZIP（密歇根是 480–499 开头）就按意大利；
+4. 都没有时按美国。
+
+美国地址不会被误判：地址里只要有“州 + ZIP”（`AZ 85007`，也包括 `APO AE 09012`），就一定按美国（`default_country` 也改不了），
+后面的收件人名（John Holland）、中文备注（“放小区门口”）、片假名名字都不会改变国家；末尾的 `DE`、`MD`、`Rhode Island`、
+`Georgia` 是美国州，`Staten Island`、`New Britain`、`New Holland`、`Little Italy` 是美国地名；街道后面直接跟一个和国家同名的
+小镇（`270 S River Ave, Holland`、`300 N Coal St, Mexico`）也按美国。结构化请求只从街道行、州栏（`England`）和城市栏末尾
+（`Berlin, Germany`）读国家：城市栏整个是国名时当作美国小镇（Greece NY、Holland MI），单元栏从不读。
+地址写的是加拿大、澳大利亚、中国、俄罗斯等暂不支持的国家时返回 422（中英文说明），不会拿美国数据去“核实”。
+
+`GET /countries` 列出支持的国家和各自的数据源。返回结构和美国一样，另带 `country`、`provider`
+（数据源名称、`authority`、许可证和需要展示的署名），日本另带 `jp`（`parcel`：地番地址；`go_given`：输入里有号）。
 
 每个国家按顺序问数据源，前一个出错（或在该地区没有数据）才问下一个：
 
 | 国家 | 数据源 | 说明 |
 |---|---|---|
-| 法国 | BAN（IGN Géoplateforme 地理编码） | 不存在的门牌返回街道，不会给邻近门牌 |
-| 荷兰 | BAG（PDOK Locatieserver） | 有邮编时用精确过滤；字母和附加号（`8-H`、`1A`）按单元核对 |
-| 比利时 | 弗拉芒：Digitaal Vlaanderen 地址登记（含 bus 单元号）；瓦隆：ICAR geocodeWS | 按邮编分区。布鲁塞尔的 UrbIS 限制商业使用，改用 Overture 里的联邦 BeST 数据 |
+| 法国 | BAN（IGN Géoplateforme 地理编码） | 不存在的门牌返回街道，不会给邻近门牌。CEDEX 邮编只作提示，不算邮编错误 |
+| 荷兰 | BAG（PDOK Locatieserver） | 有邮编时用精确过滤；字母和附加号（`8-H`、`1A`、`123 hs`、`2 III`）按单元核对，大楼的附加号逐个查 |
+| 比利时 | 弗拉芒：Digitaal Vlaanderen 地址登记（含 bus 单元号）；瓦隆：ICAR geocodeWS | 按邮编分区。布鲁塞尔的 UrbIS 限制商业使用，改用 Overture 里的联邦 BeST 数据（荷兰语街名也能对上） |
 | 卢森堡 | geoportail.lu（BD-Adresses） | |
 | 瑞士 | 联邦建筑地址目录（geo.admin.ch 搜索） | 不存在的门牌会返回邻近门牌，作为同街建议 |
-| 奥地利 | BEV 地址登记（地籍查看器背后的搜索） | 不是公开文档的接口，失效时自动改用 Overture |
-| 西班牙 | CartoCiudad（IGN） | 邮编不能放进查询，单独比对 |
-| 挪威 | Kartverket 地址登记 | 字母属于门牌（`11A`），单元号是 H 编号（`H0201`） |
-| 芬兰 | Syke Ryhti 建筑地址登记 | 芬兰语或瑞典语街名；门牌区间（`11-13`）包含 12 |
-| 冰岛 | HMS 地址登记（WFS） | 需要冰岛字母 |
-| 爱沙尼亚 | In-ADS（Maa- ja Ruumiamet） | 含公寓号（`Narva mnt 7-1`） |
-| 拉脱维亚 | VZD 国家地址登记（data.gov.lv） | 需要拉脱维亚字母；不带时自动改用 Overture |
-| 波兰 | PRG（GUGiK） | 需要城市。机构的邮政编码常和登记里的不同，邮编不一致只作提示 |
-| 捷克 | RÚIAN（ČÚZK） | `151/1a`（建筑号/方位号）写哪一个都能对上 |
-| 斯洛文尼亚 | GURS 门牌登记 | 没有街名的村庄用村名代替街名 |
-| 德国、意大利、葡萄牙、丹麦、立陶宛、斯洛伐克、克罗地亚、塞尔维亚、列支敦士登、法罗群岛 | Overture Maps（这些国家的官方开放地址登记），先用 Photon（OpenStreetMap 搜索）找到街道位置 | 德国缺巴伐利亚，那里改用 OpenStreetMap |
-| 英国、爱尔兰、瑞典、希腊、匈牙利、罗马尼亚等 | OpenStreetMap（Photon）；英国邮编另用 postcodes.io 核对 | 这些国家没有免费的官方门牌接口。OSM 社区数据，找到门牌算核实（置信度 0.75），找不到门牌**不算证据**：返回 `not_covered`（无法判断），只有连街道都找不到才是 `not_found` |
+| 奥地利 | BEV 地址登记（地籍查看器背后的搜索） | 不是公开文档的接口，出错或返回看不懂的数据时改用 Overture；门牌不存在时再查这条街，给出同街门牌 |
+| 西班牙 | CartoCiudad（IGN） | 邮编作为过滤条件（放进查询文字会查不到）；加泰罗尼亚语街名（Carrer、Passeig、Avinguda）按西班牙语对应 |
+| 挪威 | Kartverket 地址登记 | 字母属于门牌（`11A`），单元号是 H 编号（`H0201`）；先在写明的城市里查，再查全国 |
+| 芬兰 | Syke Ryhti 建筑地址登记 | 芬兰语或瑞典语街名和城市名；门牌区间（`11-13`）只含同侧的 11 和 13 |
+| 冰岛 | HMS 地址登记（WFS） | 需要冰岛字母；记录没有城市，按邮编换算城市再比对 |
+| 爱沙尼亚 | In-ADS（Maa- ja Ruumiamet） | 含公寓号（`Narva mnt 7-1`）；不带爱沙尼亚字母查不到时改用 Overture |
+| 拉脱维亚 | VZD 国家地址登记（data.gov.lv） | 需要拉脱维亚字母，不带时改用 Overture；`386 k-2`（楼号）按一个门牌查 |
+| 波兰 | PRG（GUGiK） | 需要城市；没有街名的村庄（`Przybysławice 12`）按村名 + 门牌查。机构的邮政编码常和登记里的不同，邮编不一致只作提示 |
+| 捷克 | RÚIAN（ČÚZK） | `151/1a`（建筑号/方位号）写哪一个都能对上；没有街名的村庄按村名 + 建筑号；`Praha 2` 这种区名保留 |
+| 斯洛文尼亚 | GURS 门牌登记 | 没有街名的房子用村名代替街名（有街名的房子不行，`Bled 5` 不会对上布莱德任意一条街的 5 号） |
+| 德国、意大利、葡萄牙、丹麦、立陶宛、斯洛伐克、克罗地亚、塞尔维亚、列支敦士登、法罗群岛 | Overture Maps（这些国家的官方开放地址登记），先用 Photon（OpenStreetMap 搜索）在写明的城市里找到街道，再沿整条街找门牌 | 德国缺巴伐利亚，那里直接用 OpenStreetMap。葡萄牙的数据只收住宅，商铺门牌常缺，找不到门牌时返回 `not_covered` 而不是“门牌不存在”。斯洛伐克的 `553/25` 写哪个号都能对上 |
+| 英国、爱尔兰、瑞典、希腊、匈牙利、罗马尼亚、海峡群岛、马恩岛、直布罗陀等 | OpenStreetMap（Photon）；英国邮编另用 postcodes.io 核对 | 这些国家没有免费的官方门牌接口。OSM 社区数据，找到门牌算核实（置信度 0.75），找不到门牌**不算证据**：返回 `not_covered`（无法判断），只有连街道都找不到才是 `not_found` |
 | 日本 | 国土地理院住所検索 + 日本邮政邮编表 | 见下 |
 
-所有数据源找到“东西”都不直接算数：门牌（含字母）、街道名、邮编都和输入重新比对，因为多数服务对不存在的门牌会返回
-街道或邻近门牌。街道名比对会去掉重音、展开各语言的缩写（`Str.`、`bd`、`ul.`、`gt` 等），罗马数字、数字和数词视为相同
-（意大利登记写 `Via Venti Settembre`，用户写 `Via XX Settembre`），双语街名（布鲁塞尔 `Grote Markt - Grand-Place`）分开比。
-邮编不一致时照样核实，但标出（和美国的 ZIP 一样，页面会提示正确邮编）。
+所有数据源找到“东西”都不直接算数：门牌（含字母）、街道名、邮编、城市都和输入重新比对，因为多数服务对不存在的门牌会返回
+街道或邻近门牌，不少还会在全国范围找同名街道：
+
+- **城市必须对上**：记录的邮编或城市和输入一致才算核实。`Karl Johans gate 22, Bergen` 不会因为奥斯陆有这个门牌就算数，
+  而是返回“这条街和门牌只在别的城市有”。邮编和输入差得远（不在同一省/区，如 54470 和 89250）的记录不算输入的城市，
+  即使城市同名（法国有几千个同名市镇，`Beaumont` 就有十几个）；同一城市里写错邮编（慕尼黑 80331 / 81241、`Praha 2` 配了
+  Praha 1 的邮编，或邮编只差最后几位）照样核实，并标出正确邮编。名字开头相同的另一个市镇不算同一城市（Lille /
+  Marquette-lez-Lille、Neu-Ulm / Ulm、Buchs SG / Buchs ZH），带括号的城市名（`Frankfurt (Oder)`、`Halle (Saale)`）不会被当成
+  同名的大城市；城市的英文和中文写法（Vienna、Munich、慕尼黑）按当地名称查询和比对。没写城市也没写邮编、同名街道门牌
+  又不止一处，或者只写了城市、门牌在城里不止一个邮编区时，返回 `not_covered`（请补上城市或邮编）。
+- **街道必须是这一条**：数据源在这个城市里有和输入同名的街道时，只认这条街（`Markt 7` 不会被 `Marktstraße 7` 顶替）；只有
+  找不到同名街道时才接受拼写相近的，并在说明里标出差异。省略的类型词不影响（`Castellana 81` = `Paseo de la Castellana 81`、
+  `Jerozolimskie` = `Aleje Jerozolimskie`），但类型词不同（拉脱维亚 `iela` / `gatve`、`ul.` / `al.`）、多了方位词
+  （`Norra Hamngatan`、`Nørre Voldgade`）或多了前面的名字（`Kensington High Street`）都算另一条街。街道名比对会去掉重音、展开各语言的缩写（`Str.`、`bd`、`ul.`、`gt`、`C.so`、
+  `Gal`、`c.` 等）、容忍省略名字的人名街道（`ul. Kościuszki` = `ul. Tadeusza Kościuszki`）和词序（`VIA VERDI GIUSEPPE`）；
+  罗马数字、数字、数词和序数词视为相同（`Via XX Settembre` / `Via Venti Settembre`，`Vittorio Emanuele II` / `SECONDO`），
+  双语街名（布鲁塞尔 `Grote Markt - Grand-Place`）分开比。门牌区间（`48/50`）包含其中同侧的门牌。
+- 地址解析能处理订单里常见的写法：街名和门牌之间的逗号（`Calle de Alcalá, 45`、`12, rue de la Paix 75002 Paris`）、
+  `nº` / `Nr.`、城市写在前面（`Debrecen, Váci utca 10.`、`80331 München, ...`）、`Praha 2` / `Dublin 2` 这类区名、城区和郡
+  （`Damrak 1, Centrum, Amsterdam`、`Kinsale, Co. Cork` 取真正的城市）、丢了前导 0 的邮编（`1067 Dresden` 读作 01067，
+  并提示）、门牌后面的楼层和单元（`Top 5`、`3. th.`、`EG links`、`2 Izquierda`、`3 piętro`、`hs`、`A 5`、`H0201`）、
+  收件人 / 公司 / 电话 / 括号备注（放进 `notes`，不参与匹配）、中文输入法的标点。认不出的部分放进 `notes`，不会悄悄丢掉。
+- 邮政信箱和自提柜（`PO Box`、`Postfach`、`BP`、芬兰 `PL`、`Packstation`）返回 `invalid_input` 并说明；本来就没有门牌号的
+  真实地址（英国房名、`s/n`、法国 lieu-dit、北欧和波罗的海国家的农庄名）返回 `not_covered`；普通街道漏写了门牌
+  （`Hauptstraße, 80331 München`）仍是 `invalid_input`。
+- 数据源出错、跳过，或官方登记什么都没找到（例如不带当地字母的街名）时问下一个数据源；官方登记什么都没找到时，后面的
+  数据源只有街名完全一致才采用（根特没有 `Grote Markt`，Overture 的 `Groentenmarkt 1` 只列为候选）；后面的数据源给不出更好的
+  结论时，仍用前面的结论。同一个数据源连续失败 3 次后一分钟内不再请求它；一个地址最多查 60 秒。
 
 **日本**：地址是“町 + 丁目 + 番（街区）+ 号（建筑）”，国土地理院返回它知道的最深一级，比对规则：
 
 - 号也对上：`verified`；只对上番（东京都心大部分地方没有号的数据）：`verified` + `match_level: "block"`，页面显示“已核实到番”，
-  号无法核实；丁目存在但没有这个番：`street_only`；町存在但没有这个丁目：`not_found`；
-  乡下用地番（`978-6`）而国土地理院只到町名的地方：`not_covered`。
-- 罗马字地址（`2-8-1 Nishi-Shinjuku, Shinjuku-ku, Tokyo 163-8001`）国土地理院读不了：用日本邮政的邮编表（含罗马字）
-  把邮编或町名、区市名换成汉字再查。邮编表启动时下载到 `NAD_DATA_DIR`（默认 `data/`，约 3 MB），每月更新。
-- 带邮编时核对邮编是否属于这个町，不属于时给出正确邮编。
-- 房间号、楼名（`101号室`、`5F`、`-101`）会去掉。
+  号无法核实（这个番有号的数据、只是没有这个号时是 `street_only`）；丁目存在但没有这个番：`street_only`；
+  町存在但没有这个丁目：`not_found`；乡下用地番（`978-6`、`978番地の6`）而国土地理院只到町名的地方：`not_covered`；
+  札幌等地 `北4条西4丁目1` 这种丁目里的番地按番地核对。
+- 国土地理院按地名检索，`本町`、`中央` 这种全国有几十处的町名需要都道府県和市区町村：写在门牌后面的（`本町1-1-1, 中央区, 大阪府`）、
+  请求里的 `state` / `city` / `zip` 字段、邮编，都会用来确定是哪一处；仍然确定不了时返回 `geocode_failed` 并列出同名地点，
+  不会随便核实其中一处。`state` / `city` 字段可以写汉字、罗马字（`Tokyo`）、ISO 代码（`JP-13`）或简体字，只作为偏好：
+  对不上时在说明里指出，不会因此把真实地址判成找不到。政令市漏写区（`大阪市梅田3-1-1`）时按邮编表补上区。
+- 罗马字地址（`2-8-1 Nishi-Shinjuku, Shinjuku-ku, Tokyo 163-8001`）国土地理院读不了：用日本邮政的邮编表把写出的町名、
+  区市名换成汉字再查。写出的都道府県必须一致（`Fuchu-cho, Hiroshima` 不会读成东京的府中市），郡名可写可不写
+  （`Karuizawa-machi, Nagano`）。以写出的町名为准，邮编只用来区分同名的町，不会把地址挪到邮编所在的町（邮编写错时照常
+  提示；町名和邮编在不同的都道府県、又没写都道府県时不核实）。长音、`Ō`、`Oh`（`Ohta-ku`）、`Nihombashi` / `Nihonbashi`
+  等写法都能识别。
+- 带邮编时核对邮编是否属于这个町（按丁目区分的邮编、大楼和大企业的专用邮编都认），不属于时给出正确邮编。
+- 地址前后的收件人、公司、`住所：` 等标签和电话号码（需要有区号的 0 或 `TEL` 标签，`1-1 1203` 的 1203 是房间号）会去掉；
+  楼名里的都道府県名（`東京都庁`、`北海道大学`）不会截断地址；京都的 `寺町通御池上る` 这种走法只去掉通名部分，保留区名；
+  汉数字的番地（`六二五番地`、`九七八番地の六`）照常读；简体字（`东京都`、`神奈川县`）查不到时换成日文汉字再查。
+  房间号、楼名（`101号室`、`5F`、`-101`）不参与核对。
+- 邮编表（日本邮政的 `utf_ken_all`、罗马字表和大企业邮编表，共约 5 MB）由后台任务下载到 `NAD_DATA_DIR`（默认 `data/`），
+  每月更新，下载失败时按 1 分钟起翻倍的间隔重试；请求从不等待下载。没加载好时，日文地址照常核对（只是不核对邮编），
+  罗马字地址返回 `upstream_error`。每个 worker 加载后约占 170 MB 内存（默认 2 个 worker 约 340 MB）。
 - 国土地理院这个检索接口是它自己地图网站用的，没有承诺长期提供。
 
-**注意**：以上都是在美国 IP 上测试的。部署到其他地区后请跑一遍 `scripts/smoke_test.py`（含每个国家的用例），
-看哪些数据源从服务器上连不通。斯洛伐克、塞尔维亚、立陶宛的官方接口只对部分国家的 IP 开放，所以这三个国家直接用 Overture。
-Photon 公共实例只要求“合理使用”（并发限制在 2），大批量使用请自建 Photon 并设置 `PHOTON_URL`；
+**注意**：以上都是在美国 IP 上测试的。部署到其他地区后请打开 `/health?deep=true`（会逐个请求每个国家的数据源）并跑一遍
+`scripts/smoke_test.py`，看哪些数据源从服务器上连不通；页头的状态提示也会列出连不通的海外数据源。
+斯洛伐克、塞尔维亚、立陶宛的官方接口只对部分国家的 IP 开放，所以这三个国家直接用 Overture。
+Photon 公共实例只要求“合理使用”（每个 worker 并发限制在 2），大批量使用请自建 Photon 并设置 `PHOTON_URL`；
 公共 Nominatim 的使用政策禁止地址校验类服务，所以没有使用。
 
 ## 启动
@@ -136,20 +195,27 @@ docker build -t nad-api . && docker run -p 8000:8000 nad-api
 
 网页：
 - `http://<host>:8000/`：单条校验。结果页列出匹配记录、逐项比对、县覆盖和 Overture 补查情况；地图上标出匹配记录、
-  Census 定位点和同街最近的门牌（带门牌号），同街门牌、候选地址点一下就能复查。
+  Census 定位点和同街最近的门牌（带门牌号），同街门牌、候选地址点一下就能复查（没有定位点时不显示“距定位点”列）。
   `/` 按 `Accept` 头区分：浏览器拿到页面，`curl` 等 API 客户端仍拿到原来的 JSON。
 - `http://<host>:8000/batch`：批量校验，一次最多 500 行。可以每行粘贴一个地址、从 Excel 复制多列，或上传 CSV
   （表头 `address`，或 `street` / `unit` / `city` / `state` / `zip`，也认中文表头；UTF-8 / GBK 均可）。
   订单导出里带前缀的列名（`Shipping Address 1`、`Ship City`、`收件人地址`、`收货城市` 等）也能识别。
-  各国地址可以混在一起：有 `country`（“国家”）列时按它，否则按地址末尾的国家名或日文识别，其余按页面上选的默认国家。
+  同时有买家地址和收货地址的导出（eBay 的 `Buyer Address 1` 和 `Ship To Address 1`）按收货地址。
+  各国地址可以混在一起：有国家列时按它（`country`、`Ship Country`、`Destination Country`、`ISO`、`国家`、`目的国`、
+  `国家二字码`、繁体 `國家` 等都认；没有表头、也没选默认国家时，最后一列全是本服务支持的国家代码（`FR`、`NL`、`IT` 等）
+  才当国家列，而且只作为这一行的默认国家（`default_country`）发送：地址里写了美国州和 ZIP、或写了国家的，仍按地址本身；
+  `DE`、`MT`、`AL` 这类同时是美国州缩写的代码留在地址里由服务端判断；这一列其实是省份时，在页面上选默认国家即可关掉这个识别），
+  否则按地址里写的国家或日文识别，只有这两样都没有的行才按页面上选的默认国家（作为 `default_country` 发送）。某一格超过接口长度上限（地址 300 字等）的行直接标出，不发送，以免整批 20 行被拒。
   页面按每批 20 条调用 `/v1/verify/batch?stream=true`，每条查完立刻显示（不用等同批最慢的那条），可停止、继续、
-  重试失败行；地图按结论着色显示每一行（没有匹配记录时用 Census 定位点），跟随筛选，点圆点看详情。
+  重试失败行（服务明确拒绝的行，比如不支持的国家，不再重试）；地图按结论着色显示每一行（没有匹配记录时用定位点，
+  官方登记没有定位点时用同街最近的门牌并注明），跟随筛选，点圆点看详情。
   导出 CSV 时原表的列原样保留，后面追加 `verify_status`、`verify_verdict`、`verify_confidence`、`verify_matched_address`、
   `verify_country`、`verify_nearest_number`（门牌不存在时同街最近的门牌）、`verify_census_matches`（Census 匹配到多个地址时的个数）、`verify_zip_should_be`（填的 ZIP 和记录不一致时，
-  记录里的 ZIP；地址存在但 ZIP 填错会让包裹分错，结果行里也会标出来）等结果列。
+  记录里的 ZIP；地址存在但 ZIP 填错会让包裹分错，结果行里也会标出来）、`verify_license` / `verify_attribution`
+  （数据许可和需要标注的来源）等结果列。
   有 10 行以上结果还没导出就离开页面时，浏览器会提示。
 - 页头的状态点显示各上游最近一次调用的结果，例如服务器连不上 Census 时会显示“Census 地理编码不可用”，
-  鼠标悬停看具体错误。
+  鼠标悬停看具体错误；海外数据源或日本邮编表不可用时显示“部分海外数据源不可用”（状态点仍只看美国的服务）。
 
 所有响应都做 gzip 压缩（一批 10 条结果 48 KB → 6 KB，leaflet.js 147 KB → 43 KB），服务器离用户远时差别明显。
 
@@ -171,8 +237,9 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 ```
 
 参数（长度上限：`address` 300、`street` 200 个字符，超出返回 422）：`address`（单行）或 `street`+`city`/`state`/`zip`（结构化）；可选 `country`（见[欧洲和日本](#欧洲和日本)，
-不支持的国家返回 422）、`unit`、`lat`+`lon`（跳过地理编码）、
-`zip_fallback`（Census 编码失败时在整个 ZIP 区域搜索，较慢 3–20 s）、`overture_fallback`（默认 `true`）、`max_candidates`。
+不支持的国家返回 422）、`default_country`（地址里没写国家时才用）、`unit`、`lat`+`lon`（跳过地理编码）、
+`zip_fallback`（Census 编码失败时在整个 ZIP 区域搜索，较慢 3–20 s）、`overture_fallback`（默认 `true`，只影响美国地址：
+欧洲的 Overture 是主要数据源，不受它影响）、`max_candidates`。美国以外 `zip` 是邮编，日本的 `state` / `city` 用来确定都道府県和市区町村。
 
 返回要点：
 
@@ -203,9 +270,9 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 | `unit_not_found` | 楼栋存在，但该单元没有记录（很多数据源不录单元，`notes` 会列出已有单元） |
 | `street_only` | 附近有这条街，但没有这个门牌；`suggestions` 给出同街最接近的门牌 |
 | `not_found` | 该地区有数据覆盖，但无匹配 —— 较大概率是错误/虚构地址 |
-| `not_covered` | NAD 和 Overture 在该地区都没有数据，无法判断 |
+| `not_covered` | NAD 和 Overture 在该地区都没有数据，无法判断（美国以外还包括：OSM 没收录门牌、地址没有门牌号、没写城市而同名地址有多处） |
 | `geocode_failed` | Census 找不到这个地址（或拒绝了输入）；带 ZIP 可加 `zip_fallback=true` 重试 |
-| `invalid_input` | 解析不出门牌号（PO Box 也在此列，`notes` 会说明） |
+| `invalid_input` | 解析不出门牌号（PO Box、邮政信箱、自提柜也在此列，`notes` 会说明） |
 | `upstream_error` | 免费上游超时/故障，包括连不上 Census 地理编码 —— 这种情况不代表地址有问题 |
 
 ### `POST /v1/verify/batch`
@@ -236,8 +303,10 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 
 `upstreams` 列出每个上游（`census_geocoder`、`nad`、`nad_coverage`、`tigerweb`、`overture`）最近一次真实调用是否成功、
 错误信息和距今秒数；任一失败时 `status` 为 `degraded`。不带参数时不发任何上游请求；`deep=true` 会立即（不走缓存）
-请求每个上游，并返回 NAD 点数/延迟、Overture 当前 release。其他国家的数据源单独列在 `intl_upstreams`，
-它们出错不会把整个服务标成 `degraded`；`japanpost` 显示日本邮编表是否已加载。
+请求每个上游，并返回 NAD 点数/延迟、Overture 当前 release，也会用一个已知地址请求每个国家的数据源。`deep=true` 每分钟最多
+真正执行一次（期间的请求直接返回上次的结果，带 `deep_age_s`），设置了 `NAD_API_KEYS` 时需要带 `X-API-Key`，以免被人
+反复调用、连累服务器 IP 被各国数据源封禁。其他国家的数据源单独列在
+`intl_upstreams`，它们出错不会把整个服务标成 `degraded`；`japanpost` 显示日本邮编表是否已加载。
 
 ## 配置（环境变量）
 
@@ -261,18 +330,20 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 | `OVERTURE_THREADS` | 16 | DuckDB 线程数。读 S3 时线程主要在等网络，比 CPU 核数多更快（冷启动实测：32 线程 2.3 s，1–2 线程 9–26 s） |
 | `OVERTURE_WARMUP_TIMEOUT_S` | 180 | 启动预热查询的超时（后台进行，不影响用户请求；用户请求仍用 `OVERTURE_TIMEOUT_S`） |
 | `PHOTON_URL` | `https://photon.komoot.io` | OpenStreetMap 搜索（德国、意大利等定位，英国等 OSM 国家核对）。大批量使用请自建 |
-| `PHOTON_CONCURRENCY` / `INTL_CONCURRENCY` | 2 / 4 | 每个海外数据源同时进行的请求数 |
+| `PHOTON_CONCURRENCY` / `INTL_CONCURRENCY` | 2 / 4 | 每个海外数据源同时进行的请求数（每个 worker） |
+| `NAD_INTL_TIMEOUT_S` | 60 | 美国以外的一个地址最多查多久，超时返回 `upstream_error` |
+| `NAD_INTL_BREAKER_S` | 60 | 海外数据源连续失败 3 次后，这么多秒内不再请求它 |
 | `NAD_DATA_DIR` | `data/` | 下载的参考数据（日本邮政邮编表） |
 | `FR_BAN_URL`、`NL_PDOK_URL`、`GSI_URL` 等 | 各官方地址 | 每个数据源的地址都可以覆盖（见 `app/config.py`） |
 
 缓存、限流和 DuckDB 连接都是进程内的：多 worker 时各自独立（每个 worker 各自预热 Overture、各占最多
-`OVERTURE_MEMORY_LIMIT` 内存）；需要共享缓存/限流可换 Redis。
+`OVERTURE_MEMORY_LIMIT` 内存，各自加载日本邮编表约 170 MB，海外数据源的并发限制也按 worker 计）；需要共享缓存/限流可换 Redis。
 
 ## 测试
 
 ```bash
-.venv/bin/python -m pytest -q tests                      # 离线：解析/归一化、判定流程、Overture 映射、各国数据源的响应解析、网页路由、上游客户端（111 个）
-.venv/bin/python scripts/smoke_test.py http://127.0.0.1:8000   # 在线：45 个真实地址端到端（美国 17 个，含 Overture 兜底；欧洲和日本 28 个）
+.venv/bin/python -m pytest -q tests                      # 离线：解析/归一化、判定流程、Overture 映射、各国数据源的响应解析、网页路由、上游客户端（1831 个）
+.venv/bin/python scripts/smoke_test.py http://127.0.0.1:8000   # 在线：60 个真实地址端到端（美国 21 个，含 Overture 兜底和国家识别；欧洲和日本 39 个）
 ```
 
 ## 已知局限

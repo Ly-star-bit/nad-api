@@ -95,6 +95,10 @@ PHOTON_URL = os.getenv("PHOTON_URL", "https://photon.komoot.io").rstrip("/")
 # Concurrent requests per foreign service (a 100-row batch for one country never sends more than this at once).
 INTL_CONCURRENCY = _env_int("INTL_CONCURRENCY", 4)
 INTL_SERVICE_CONCURRENCY = {"photon": _env_int("PHOTON_CONCURRENCY", 2)}
+# One address may ask several sources in turn; past this many seconds it is answered upstream_error.
+INTL_TIMEOUT_S = _env_float("NAD_INTL_TIMEOUT_S", 60.0)
+# A source that failed 3 times in a row is skipped for this many seconds.
+INTL_BREAKER_S = _env_float("NAD_INTL_BREAKER_S", 60.0)
 # Downloaded reference data (Japan Post postcode tables, refreshed monthly).
 DATA_DIR = os.getenv("NAD_DATA_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"))
 

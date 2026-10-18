@@ -122,7 +122,7 @@
     </div>
     <div class="opts">
       <label>国家 <select id="cc" aria-label="国家"><option value="">自动识别</option></select></label>
-      <label><input id="ov" type="checkbox" checked>NAD 查不到时用 Overture 补查</label>
+      <label><input id="ov" type="checkbox" checked>美国：NAD 查不到时用 Overture 补查</label>
       <label><input id="zf" type="checkbox">定位失败时按 ZIP 范围搜索（较慢）</label>
     </div>
     <div id="keyrow" class="keyrow" hidden>
@@ -151,9 +151,9 @@
 </div>
 
 <script type="module">
-import { STATUS, SOURCE, store, esc, tone, label, pct, fmtMs, setupKey, describeHttpError, showHealth, copyText, zipMismatch,
-  zipWord, verdictLabel, verdictText, loadCountries } from './static/common.js';
-import { createMap, fit, colors, resultPoint } from './static/map.js';
+import { STATUS, SOURCE, sourceName, store, esc, tone, label, pct, fmtMs, setupKey, describeHttpError, showHealth, copyText,
+  zipMismatch, zipWord, verdictLabel, verdictText, loadCountries } from './static/common.js';
+import { createMap, fit, colors, pointOf } from './static/map.js';
 
 const $ = (s) => document.querySelector(s);
 const form = $('#form'), q = $('#q'), cc = $('#cc'), ov = $('#ov'), zf = $('#zf'), out = $('#out');
@@ -240,13 +240,13 @@ function renderResult(r) {
       ${r.data_source == null ? '' : `<dl class="v-stats">
         <div><dt>置信度</dt><dd>${pct(r.confidence)}</dd></div>
         <div><dt>匹配到</dt><dd>${LEVEL[r.match_level] || '—'}</dd></div>
-        <div><dt>数据来源</dt><dd>${esc(SOURCE[r.data_source] || r.data_source || '—')}</dd></div>
+        <div><dt>数据来源</dt><dd>${esc(sourceName(r) || '—')}</dd></div>
       </dl>`}
     </header>`;
 
   const lines = bm ? addrLines(bm) : [r.input];
-  const pt = resultPoint(r);
-  const tools = [bm ? '<button type="button" class="linkbtn" data-copy-addr>复制地址</button>' : '', pt ? mapLinks(pt, !bm) : '']
+  const po = pointOf(r), pt = po && po.point;
+  const tools = [bm ? '<button type="button" class="linkbtn" data-copy-addr>复制地址</button>' : '', pt ? mapLinks(po) : '']
     .filter(Boolean).join('<span class="sep">/</span>');
   h += `<section class="sec">
       <div class="k">${bm ? '匹配到的记录' : '输入的地址'}</div>
@@ -349,9 +349,10 @@ async function drawResultMap(r) {
   declutter();
 }
 
-function mapLinks(p, approx) {
+function mapLinks({ point: p, kind }) {
   const ll = `${p.lat.toFixed(6)},${p.lon.toFixed(6)}`;
-  return `<span>${approx ? '定位点' : '在地图上查看'}</span>
+  const label = kind === 'match' ? '在地图上查看' : kind === 'nearby' ? `同街最近的门牌 ${esc(p.formatted || '')}` : '定位点';
+  return `<span>${label}</span>
     <a href="https://www.openstreetmap.org/?mlat=${p.lat}&amp;mlon=${p.lon}#map=18/${p.lat}/${p.lon}" target="_blank" rel="noopener">OpenStreetMap ↗</a>
     <a href="https://www.google.com/maps/search/?api=1&amp;query=${ll}" target="_blank" rel="noopener">Google 地图 ↗</a>`;
 }
@@ -363,8 +364,8 @@ function ambiguity(r) {
   const rows = alts.map((a) => `<tr data-q="${esc(a.matched_address)}" tabindex="0">
       <td class="a">${esc(a.matched_address)}</td><td class="act">校验 →</td></tr>`).join('');
   return `<section class="sec amb">
-      <h3>这个地址对应 ${g.match_count} 个地方</h3>
-      <p class="hint">Census 找到 ${g.match_count} 个符合的地址，上面只核对了第一个（<span class="mono">${esc(g.matched_address)}</span>）。
+      <h3>这个地址对应 ${Number(g.match_count) || 0} 个地方</h3>
+      <p class="hint">Census 找到 ${Number(g.match_count) || 0} 个符合的地址，上面只核对了第一个（<span class="mono">${esc(g.matched_address)}</span>）。
         补上州或 ZIP 就能确定是哪一个，也可以直接点下面的地址校验。</p>
       <table><tbody>${rows}</tbody></table>
     </section>`;
@@ -419,8 +420,8 @@ function fields(r) {
       : f.adopted ? `NAD 的结果是「${esc(label(f.triggered_by))}」，采用了 ${rel} 的结果「${esc(label(f.status))}」`
       : `${rel} 的结果是「${esc(label(f.status))}」，没有更好，保留 NAD 的结果`);
   }
-  const pt = resultPoint(r);
-  if (pt) add(bm ? '坐标' : '定位点坐标', `<span class="mono">${pt.lat.toFixed(6)}, ${pt.lon.toFixed(6)}</span>`);
+  const po = pointOf(r), pt = po && po.point;
+  if (pt && po.kind !== 'nearby') add(bm ? '坐标' : '定位点坐标', `<span class="mono">${pt.lat.toFixed(6)}, ${pt.lon.toFixed(6)}</span>`);
   const t = r.timing_ms || {};
   if (t.total != null) {
     const parts = Object.entries(t).filter(([k]) => k !== 'total').map(([k, v]) => `${esc(TIMING[k] || k)} ${fmtMs(v)}`);
@@ -430,14 +431,16 @@ function fields(r) {
 }
 
 function table(title, rows, withScore) {
+  // register results without a geocode have no distance: then the column would be '—' all the way down
+  const withDist = rows.some((c) => c.match && c.match.distance_m != null);
   const body = rows.map((c) => `<tr data-q="${esc(c.formatted)}" tabindex="0">
       <td class="a">${esc(c.formatted)}</td>
       ${withScore ? `<td class="num">${c.match ? pct(c.match.score) : '—'}</td>` : ''}
-      <td class="num">${fmtDist(c.match && c.match.distance_m)}</td>
+      ${withDist ? `<td class="num">${fmtDist(c.match && c.match.distance_m)}</td>` : ''}
       <td class="act">校验 →</td>
     </tr>`).join('');
   return `<section class="sec"><h3>${esc(title)}</h3><table>
-      <thead><tr><th>地址</th>${withScore ? '<th class="num">匹配分</th>' : ''}<th class="num">距定位点</th><th></th></tr></thead>
+      <thead><tr><th>地址</th>${withScore ? '<th class="num">匹配分</th>' : ''}${withDist ? '<th class="num">距定位点</th>' : ''}<th></th></tr></thead>
       <tbody>${body}</tbody></table></section>`;
 }
 
@@ -519,6 +522,7 @@ async function run(push) {
 function setCountry(code) {
   if (code && ![...cc.options].some((o) => o.value === code)) cc.add(new Option(code, code));
   cc.value = code || '';
+  wantCountry = cc.value;
 }
 
 function fromUrl() {
@@ -561,10 +565,22 @@ document.addEventListener('click', (e) => {
   } else if (t.hasAttribute('data-copy')) {
     copied(t, lastJson);
   } else if (t.hasAttribute('data-copy-addr')) {
-    const f = lastResult.best_match.formatted || '';
-    copied(t, (lastResult.country || 'US') === 'US' ? f.toUpperCase() : f);
+    copied(t, copyAddress(lastResult));
   }
 });
+// The matched record, as the address to keep. A Japanese match to the block (番) still carries the user's 号 and
+// building: the record alone would drop them.
+function copyAddress(r) {
+  const f = r.best_match.formatted || '';
+  if ((r.country || 'US') === 'US') return f.toUpperCase();
+  if (r.country === 'JP' && r.match_level === 'block') {
+    const nums = String((r.parsed && r.parsed.house_number) || '').split('-');
+    const go = r.jp && r.jp.go_given ? nums[nums.length - 1] : '';
+    return [f + (go ? (r.jp.parcel ? `-${go}` : `${go}号`) : ''), r.parsed && r.parsed.unit].filter(Boolean).join(' ');
+  }
+  return f;
+}
+
 function copied(btn, text) {
   btn.dataset.label ||= btn.textContent;
   copyText(text).then((ok) => {
@@ -581,7 +597,7 @@ document.addEventListener('keydown', (e) => {
 
 let wantCountry = '';
 fromUrl();
-loadCountries(cc, wantCountry).then((list) => {
+loadCountries(cc, () => wantCountry).then((list) => {
   countryNames = Object.fromEntries(list.map((c) => [c.code, c.name]));
   if (lastResult) renderResult(lastResult);
 });

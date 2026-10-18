@@ -27,6 +27,8 @@ log = logging.getLogger(__name__)
 _RELEASE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.\d+$")
 _NUMBER_RE = re.compile(r"^(\d+)\s*([A-Z]|1/2|-\d+)?$", re.I)
 _RELEASE_TTL_S = 24 * 3600
+# what costs a batch row the full timeout (an error that comes back at once doesn't)
+_SLOW_RE = re.compile(r"(?i)timed out|timeout|connect")
 
 
 def _parse_number(number: str | None) -> tuple[int | None, str]:
@@ -96,6 +98,9 @@ class OvertureClient:
         self._release_lock = asyncio.Lock()
         self._inflight: dict[str, asyncio.Task] = {}
         self.status: dict[str, Any] | None = None  # outcome of the latest real (uncached) query, for /health
+        # a hung S3 / DuckDB would cost every row of a batch the full timeout: after 3 queries in a row timed out, wait
+        # a minute. This is the US fallback's count; the European lookups pass their own (`breaker`).
+        self._fails, self._closed_until = 0, 0.0
 
     def _mark(self, error: str | None) -> None:
         self.status = {"ok": error is None, "at": time.time(), "error": error}
@@ -157,21 +162,27 @@ class OvertureClient:
     # ------------------------------------------------------------------ queries
 
     async def query(self, bbox: dict, number: int | None = None, limit: int = 5000,
-                    timeout: float | None = None) -> list[dict]:
+                    timeout: float | None = None, any_part: bool = False, breaker: list | None = None) -> list[dict]:
         """Address points inside bbox (lon/lat degrees), optionally only those whose number starts
-        with `number` (exact int/suffix matching happens in the matcher)."""
+        with `number` (exact int/suffix matching happens in the matcher). `any_part` also takes the number after
+        a '/' (Slovak and Czech "553/25": building 553, street number 25). `breaker`: the caller's own [timed-out
+        queries in a row, closed until] instead of this client's (slow 20 km European street boxes must not switch
+        off the US fallback)."""
         for attempt in range(2):
             release = await self.release(refresh=attempt > 0)
-            key = json.dumps([release, {k: round(v, 6) for k, v in bbox.items()}, number, limit])
+            key = json.dumps([release, {k: round(v, 6) for k, v in bbox.items()}, number, limit] + ([1] if any_part else []))
             cached = self.cache.get(key)
             if cached is not None:
                 return cached
             # the same box being read already (duplicate rows in a batch): share that DuckDB query
             task = self._inflight.get(key)
             if task is None:
-                task = asyncio.create_task(self._run(release, bbox, number, limit, timeout or config.OVERTURE_TIMEOUT_S))
+                if (breaker[1] if breaker is not None else self._closed_until) > time.monotonic():
+                    raise UpstreamError("overture", "not asked: it timed out 3 times in a row within the last minute")
+                task = asyncio.create_task(self._run(release, bbox, number, limit, timeout or config.OVERTURE_TIMEOUT_S,
+                                                     any_part))
                 self._inflight[key] = task
-                task.add_done_callback(lambda t, k=key: (self._inflight.pop(k, None), t.cancelled() or t.exception()))
+                task.add_done_callback(lambda t, k=key, b=breaker: self._settle(k, t, b))
             try:
                 rows = await asyncio.shield(task)
             except UpstreamError as exc:
@@ -187,7 +198,21 @@ class OvertureClient:
             return recs
         raise UpstreamError("overture", "release unavailable")
 
-    async def _run(self, release: str, bbox: dict, number: int | None, limit: int, timeout: float) -> list[dict]:
+    def _settle(self, key: str, task: asyncio.Task, breaker: list | None) -> None:
+        """A finished query counts once for the breaker, however many callers shared it (duplicate rows of a batch)."""
+        self._inflight.pop(key, None)
+        exc = None if task.cancelled() else task.exception()
+        if task.cancelled() or (exc is not None and not (isinstance(exc, UpstreamError) and _SLOW_RE.search(exc.message))):
+            return  # neither shows that S3 / DuckDB hangs, nor that it is back
+        fails = 0 if exc is None else (breaker[0] if breaker is not None else self._fails) + 1
+        until = time.monotonic() + config.INTL_BREAKER_S if fails >= 3 else 0.0
+        if breaker is not None:
+            breaker[:] = [fails, until]
+        else:
+            self._fails, self._closed_until = fails, until
+
+    async def _run(self, release: str, bbox: dict, number: int | None, limit: int, timeout: float,
+                   any_part: bool = False) -> list[dict]:
         if not _RELEASE_RE.match(release):
             raise UpstreamError("overture", f"invalid release '{release}'")
         src = f"s3://{config.OVERTURE_BUCKET}/release/{release}/theme=addresses/type=address/*.parquet"
@@ -198,12 +223,15 @@ class OvertureClient:
                    sources[1].update_time AS update_time
             FROM read_parquet('{src}')
             WHERE bbox.xmin BETWEEN ? AND ? AND bbox.ymin BETWEEN ? AND ?
-            {"AND number LIKE ? AND regexp_matches(number, ?)" if number is not None else ""}
+            {"AND regexp_matches(number, ?)" if number is not None and any_part else
+             "AND number LIKE ? AND regexp_matches(number, ?)" if number is not None else ""}
             ORDER BY (bbox.xmin - ?) ^ 2 + (bbox.ymin - ?) ^ 2
             LIMIT {int(limit)}
         """
         params: list[Any] = [bbox["xmin"], bbox["xmax"], bbox["ymin"], bbox["ymax"]]
-        if number is not None:
+        if number is not None and any_part:
+            params += [f"^([0-9]+/)?{int(number)}([^0-9]|$)"]
+        elif number is not None:
             # "1" must match "1", "1A", "1 1/2" but not "10" / "1600" (dense areas would hit LIMIT otherwise)
             params += [f"{int(number)}%", f"^{int(number)}([^0-9]|$)"]
         params += [(bbox["xmin"] + bbox["xmax"]) / 2, (bbox["ymin"] + bbox["ymax"]) / 2]  # nearest first

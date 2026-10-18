@@ -32,8 +32,12 @@ class VerifyRequest(BaseModel):
     zip: str | None = Field(None, max_length=20, examples=["85007"])
     country: str | None = Field(
         None, max_length=60, examples=["US", "DE", "Japan"],
-        description="ISO code or name (English, native or Chinese). Default: named at the end of the address line "
-                    "('..., 10117 Berlin, Germany'), a Japanese address written in Japanese, else US.")
+        description="ISO code or name (English, native or Chinese). Default: named in the address line "
+                    "('..., 10117 Berlin, Germany'), a Japanese address, else `default_country`, else US.")
+    default_country: str | None = Field(
+        None, max_length=60, examples=["DE"],
+        description="Used only when `country` is empty and the address names no country (a batch page's default): "
+                    "a country written in the address still wins.")
     lat: float | None = Field(None, ge=-90, le=90, description="Skip geocoding and search around this point")
     lon: float | None = Field(None, ge=-180, le=180)
     zip_fallback: bool = Field(
@@ -110,9 +114,10 @@ class FallbackInfo(BaseModel):
     provider: str = Field(description="'overture' for US addresses; outside the US the provider that answered "
                                       "after the country's first choice failed")
     release: str | None = Field(description="Overture release that was queried, e.g. 2026-09-23.1")
-    triggered_by: str = Field(description="NAD status that triggered the fallback")
-    status: Status | None = Field(description="verdict from Overture data alone")
-    adopted: bool = Field(description="true when the Overture verdict replaced the NAD one")
+    triggered_by: str = Field(description="US: the NAD status that triggered the fallback; elsewhere why the source "
+                                          "before it gave no answer (upstream_error, not_covered, not_found)")
+    status: Status | None = Field(description="verdict from the fallback source alone")
+    adopted: bool = Field(description="true when the fallback verdict replaced the first one")
     error: str | None = None
 
 
@@ -140,6 +145,8 @@ class VerifyResponse(BaseModel):
     country: str = Field("US", description="ISO 3166 code of the country the address was checked in")
     provider: ProviderInfo | None = Field(None, description="outside the US: who answered, its licence and the "
                                                             "attribution to show with the data")
+    jp: dict | None = Field(None, description="Japan: {parcel: a 番地 (parcel-number) address rather than 丁目-番-号, "
+                                              "go_given: the input has a 号 or branch number after the 番}")
     nad_status: Status | None = Field(description="verdict from NAD alone (before any fallback)")
     input: str
     parsed: dict
@@ -152,6 +159,19 @@ class VerifyResponse(BaseModel):
     notes: list[str]
     disclaimer: str
     timing_ms: dict[str, float]
+
+
+class CountryProvider(BaseModel):
+    key: str
+    name: str
+    authority: Literal["official", "overture", "osm"]
+    license: str
+
+
+class CountryInfo(BaseModel):
+    code: str = Field(description="ISO 3166 code")
+    name: str = Field(description="Chinese name")
+    providers: list[CountryProvider] = Field(description="asked in this order: the next only when one fails")
 
 
 class BatchItem(BaseModel):
