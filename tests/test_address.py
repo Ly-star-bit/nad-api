@@ -128,3 +128,49 @@ def test_street_key_from_text():
                                            ("Unit 0012", "12"), ("002A", "2A"), ("0", "0")])
 def test_norm_unit(raw, expected):
     assert norm_unit(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "text, street, unit, city, state, zip5",
+    [
+        ("MADISON, AL, 28869 FANNING DR NW", "FANNING DR NW", "", "MADISON", "AL", ""),
+        ("AL, MADISON, 28869 FANNING DR NW", "FANNING DR NW", "", "MADISON", "AL", ""),
+        ("28869 FANNING DR NW, AL, MADISON", "FANNING DR NW", "", "MADISON", "AL", ""),
+        ("MADISON AL 35756, 28869 FANNING DR NW", "FANNING DR NW", "", "MADISON", "AL", "35756"),
+        ("Springfield, IL, 62701, 100 Main St", "Main St", "", "Springfield", "IL", "62701"),
+        ("62701, IL, Springfield, 100 Main St", "Main St", "", "Springfield", "IL", "62701"),
+        ("Apt 5, 100 Main St, Springfield, IL 62701", "Main St", "Apt 5", "Springfield", "IL", "62701"),
+        ("2nd Floor, 100 Main St, Springfield, IL", "Main St", "2nd Floor", "Springfield", "IL", ""),
+        ("100 Main St, Springfield, IL 62701, Apt 5", "Main St", "Apt 5", "Springfield", "IL", "62701"),
+        ("Springfield, IL 62701, 100 Main St, Apt 5", "Main St", "Apt 5", "Springfield", "IL", "62701"),
+        ("Washington, DC 20500, 1600 Pennsylvania Ave NW", "Pennsylvania Ave NW", "", "Washington", "DC", "20500"),
+        # without commas
+        ("MADISON AL 35756 28869 FANNING DR NW", "FANNING DR NW", "", "MADISON", "AL", "35756"),
+        ("MADISON AL 28869 FANNING DR NW", "FANNING DR NW", "", "MADISON", "AL", ""),
+    ],
+)
+def test_shuffled_parts_are_put_back_in_order(text, street, unit, city, state, zip5):
+    pa = parse_oneline(text)
+    assert pa.house is not None and (pa.street_text, pa.unit_raw, pa.city, pa.state, pa.zip5) == (street, unit, city, state, zip5)
+    assert any("out of order" in w for w in pa.warnings)
+
+
+def test_name_line_before_the_street_is_dropped():
+    pa = parse_oneline("Acme Corp, 100 Main St, Springfield, IL 62701")
+    assert (pa.street_text, pa.city) == ("Main St", "Springfield")
+    assert any("ignored 'Acme Corp'" in w for w in pa.warnings)
+
+
+@pytest.mark.parametrize("text", [
+    "28869 FANNING DR NW,MADISON,AL US", "123 Main St, Building B, Springfield, IL", "1 World Trade Center, New York, NY 10007",
+    "100 Main St, Springfield, IL, USA", "123 Main St, Apt 4, Springfield, IL 62701",
+])
+def test_parts_in_order_are_left_alone(text):
+    assert not any("out of order" in w for w in parse_oneline(text).warnings)
+
+
+def test_short_directional_after_the_street_type_stays_with_the_street():
+    pa = parse_oneline("28869 FANNING DR NW MADISON AL 35756")
+    assert (pa.street_text, pa.city) == ("FANNING DR NW", "MADISON")
+    pa = parse_oneline("100 Main St North Miami FL 33161")
+    assert (pa.street_text, pa.city) == ("Main St", "North Miami")

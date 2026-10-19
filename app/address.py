@@ -459,13 +459,70 @@ def _state_zip_tail(text: str) -> tuple[str, str, str, str | None, int] | None:
     return state, zip5, zip4, warning, m.start()
 
 
+_SHORT_DIRECTIONS = {"N", "S", "E", "W", "NE", "NW", "SE", "SW"}
+
+
 def _split_trailing_city(street_line: str) -> tuple[str, str]:
     """'123 Main St Miami' -> ('123 Main St', 'Miami'): cut after the last street-type word."""
     toks = street_line.split()
     for i in range(len(toks) - 2, 1, -1):
         if clean(toks[i]) in SUFFIXES:
+            # a short directional after the type belongs to the street ("Fanning Dr NW Madison"); a spelled-out
+            # one starts the city ("Main St North Miami")
+            if i + 2 < len(toks) and clean(toks[i + 1]) in _SHORT_DIRECTIONS:
+                i += 1
             return " ".join(toks[: i + 1]), " ".join(toks[i + 1:])
     return street_line, ""
+
+
+_ZIP_ONLY_RE = re.compile(r"^\d{5}(?:-?\d{4})?$")
+_COUNTRY_ONLY_RE = re.compile(r"^(?:U\.?\s?S\.?(?:\s?A\.?)?|UNITED\s+STATES(?:\s+OF\s+AMERICA)?)$", re.I)
+# Without commas, the city / state / ZIP written first: "MADISON AL 35756 28869 FANNING DR NW"
+_PLACE_FIRST_RE = re.compile(r"^(?P<city>[^\d,]+?)\s+(?P<state>[A-Z]{2})(?:\s+(?P<zip>\d{5}(?:-?\d{4})?))?"
+                             r"\s+(?P<street>\d+[A-Z]?\s+.*[A-Z].*)$", re.I)
+# Order of the parts in a US address; a part of a lower rank after a higher one means the parts were shuffled.
+_RANK = {"street": 0, "unit": 1, "place": 2, "state": 3, "zip": 4, "country": 5}
+
+
+def _part_kind(seg: str) -> str:
+    if _ZIP_ONLY_RE.match(seg):
+        return "zip"
+    if _COUNTRY_ONLY_RE.match(seg):
+        return "country"
+    if len(clean(seg)) == 2 and state_abbr(seg):  # a state name ("Washington") may as well be the city
+        return "state"
+    st = _state_zip_tail(seg)
+    if st:
+        return "state" if st[4] == 0 else "place"  # "AL 35756" / "MADISON AL 35756"
+    if _UNIT_RE.match(seg) or _FLOOR_RE.match(seg):
+        return "unit"
+    m = _HOUSE_NUMBER_RE.match(seg)
+    if m and re.search(r"[A-Z]{2}", seg[m.end():], re.I):
+        return "street"
+    return "place"
+
+
+def _reorder(parts: list[str]) -> tuple[list[str], str | None]:
+    """Puts shuffled parts back in US order: 'MADISON, AL, 28869 FANNING DR NW' / 'Apt 5, 100 Main St, ...' /
+    '..., AL, MADISON'. Parts already in order come back unchanged. Places before the street are the city when
+    nothing follows the street, otherwise a name line ('Acme Corp, 100 Main St, Springfield, IL'), dropped."""
+    kinds = [_part_kind(p) for p in parts]
+    ranks = [_RANK[k] for k in kinds]
+    if kinds.count("street") != 1 or ranks == sorted(ranks):
+        return parts, None
+    i = kinds.index("street")
+    after_place = any(k == "place" for k in kinds[i + 1:])
+    dropped = [p for p, k in zip(parts[:i], kinds[:i]) if k == "place"] if after_place else []
+    by = lambda kind: [p for p, k in zip(parts, kinds) if k == kind and p not in dropped]
+    state, zips = by("state"), by("zip")
+    # a city written with its state and ZIP ("MADISON AL 35756") ends the line
+    places = sorted(by("place"), key=lambda p: _state_zip_tail(p) is not None)
+    tail = [" ".join(state + zips)] if state or zips else []
+    out = by("street") + by("unit") + places + tail
+    note = f"address parts were out of order; read as '{', '.join(out)}'"
+    if dropped:
+        note += f" (ignored '{', '.join(dropped)}' before the street)"
+    return out, note
 
 
 def parse_oneline(text: str) -> ParsedAddress:
@@ -475,6 +532,14 @@ def parse_oneline(text: str) -> ParsedAddress:
     if not raw:
         return pa
     parts = [p.strip() for p in _COUNTRY_RE.sub(r"\1", raw).split(",") if p.strip()]
+    if len(parts) == 1:
+        m = _PLACE_FIRST_RE.match(parts[0])
+        if m and state_abbr(m.group("state")) and len(clean(m.group("state"))) == 2:
+            parts = [m.group("street"), m.group("city"), " ".join(p for p in (m.group("state"), m.group("zip")) if p)]
+            pa.warnings.append(f"address parts were out of order; read as '{', '.join(parts)}'")
+    else:
+        parts, note = _reorder(parts)
+        pa.warnings += [note] if note else []
     street_line, tail = parts[0], parts[1:]
 
     if not tail:

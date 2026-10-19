@@ -49,6 +49,13 @@ Census 定位失败（新建街道常见，TIGER 里还没有）：
   被 Excel 去掉前导 0 的 ZIP（`MA 2108` → `02108`，只在补 0 后的 ZIP 属于该州时才补）、单元号前导 0（`Unit 0012` = `12`）、
   楼栋和单元连写（`Apt B201` 对应 Building B + Unit 201）；
   `Pier Ave`、`Space Park Dr` 这类含单元关键词的街名不会被误当成单元。PO Box 返回 `invalid_input` 并说明原因。
+- **顺序乱了的地址**：按逗号分段后逐段判断是门牌街道、单元、城市、州、ZIP 还是国家，顺序不对时按
+  “门牌 街道, 单元, 城市, 州 ZIP” 重排，`notes` 里写明按什么顺序读的：`MADISON, AL, 28869 FANNING DR NW`、
+  `28869 FANNING DR NW, AL, MADISON`、`Apt 5, 100 Main St, ...`、`62701, IL, Springfield, 100 Main St` 都能读对。
+  没有逗号时只认“城市 州 [ZIP] 门牌 街道”（`MADISON AL 35756 28869 FANNING DR NW`）。街道前、后都有其他段时，
+  街道前的是收件人或公司名（`Acme Corp, 100 Main St, Springfield, IL`），忽略并提示。门牌写在街名后面
+  （`FANNING DR NW 28869`）不处理：末尾的 5 位数也可能是 ZIP，`Route 66` 这类街名也以数字结尾。
+  不带逗号时街道类型后的简写方向归街道（`Fanning Dr NW Madison`），全拼的归城市（`Main St North Miami`）。
 - **Census 匹配到多个地址**（如只写 `100 Main St, Springfield`，有 7 个州的 Springfield）：只核对第一个，
   `geocode.match_count` / `geocode.alternatives` 给出其他候选，`notes` 提示补上州或 ZIP。
 
