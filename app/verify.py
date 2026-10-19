@@ -475,6 +475,7 @@ async def verify_address(
 
     # ---- 2. NAD -----------------------------------------------------------------------
     overture_area = True  # whether `extent` is small enough for the Overture fallback
+    street_unknown = False  # an area search found no street of that name: not_found would overstate it
     if geocode is not None:
         out["geocode"] = geocode
         origin = (geocode["lat"], geocode["lon"])
@@ -526,17 +527,33 @@ async def verify_address(
             zips = area["zips"]
             where = (f"the ZIP areas of {pa.city}, {pa.state} ({', '.join(zips[:8])}"
                      + (f" and {len(zips) - 8} more" if len(zips) > 8 else "") + ")")
+        name_filter = f"St_Name LIKE '%{_name_token(user_key)}%'"
         try:
-            recs = await up.nad_in_envelope(
-                extent, f"Add_Number = {pa.house.number} AND St_Name LIKE '%{_name_token(user_key)}%'")
+            recs = await up.nad_in_envelope(extent, f"Add_Number = {pa.house.number} AND {name_filter}")
             scored = _rank([score_candidate(r, pa, keys, None, ref_zip) for r in recs])
             center = ((extent["ymin"] + extent["ymax"]) / 2, (extent["xmin"] + extent["xmax"]) / 2)
             coverage = None if _street_matched(scored) else await _coverage(up, {"state": pa.state}, *center)
             out["coverage"] = coverage
-            nad_dec = decide(pa, scored, [], dataset="NAD", ref_zip=ref_zip, max_candidates=max_candidates,
-                             coverage=coverage,
-                             empty_note=f"address could not be geocoded, and NAD has no {pa.house.number} on a street "
-                                        f"named like '{pa.street_text}' in {where}")
+            suggestions: list[dict] = []
+            empty_note = (f"address could not be geocoded, and NAD has no {pa.house.number} on a street named like "
+                          f"'{pa.street_text}' in {where}")
+            if (not _street_matched(scored) and (coverage or {}).get("in_nad", True)
+                    and max(extent["xmax"] - extent["xmin"], extent["ymax"] - extent["ymin"]) <= config.AREA_STREET_PROBE_MAX_DEG):
+                # Is the street itself there? Other numbers on it are evidence against this one; no street at all
+                # is not: Census misses are mostly streets newer than the data (1410 United Dr, Shippensburg, PA).
+                try:
+                    on_street = same_street(await up.nad_in_envelope(extent, name_filter, limit=2000), pa, keys, None, ref_zip)
+                except UpstreamError:
+                    on_street = None
+                if on_street:
+                    suggestions = build_suggestions(on_street, pa, max_candidates)
+                elif on_street is not None:
+                    street_unknown = True
+                    dated = f" (data as of {coverage['data_date']})" if (coverage or {}).get("data_date") else ""
+                    empty_note = (f"neither Census nor NAD{dated} has a street named like '{pa.street_text}' in {where}: "
+                                  "the address may be newer than the data, or the street name may be misspelled")
+            nad_dec = decide(pa, scored, suggestions, dataset="NAD", ref_zip=ref_zip, max_candidates=max_candidates,
+                             coverage=coverage, empty_note=empty_note)
         except UpstreamError as exc:
             nad_dec = Decision(status="upstream_error", notes=[f"NAD street search failed: {exc.message}"])
         timings["nad"] = round((time.perf_counter() - t) * 1000, 1)
@@ -586,4 +603,6 @@ async def verify_address(
                 notes.append(f"Overture fallback ({info['release']}) returned '{ov_dec.status}'; kept the NAD result")
         timings["overture"] = round((time.perf_counter() - t) * 1000, 1)
 
+    if street_unknown and out["status"] == "not_found":
+        out.update(status="geocode_failed", confidence=0.0)
     return finish()

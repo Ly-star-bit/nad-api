@@ -54,6 +54,9 @@ PLACES_LAYER_URL = os.getenv(
 # Overture is only asked when those ZIP areas fit in this many degrees each way. All of Houston's (1.05 x 0.89)
 # takes 2-3 s once the metadata is warm.
 CITY_FALLBACK_OVERTURE_MAX_DEG = _env_float("CITY_FALLBACK_OVERTURE_MAX_DEG", 1.5)
+# When that search misses, NAD is asked whether the street itself is in the area (any number), up to this size:
+# the name-only query timed out (25 s) on a 0.47 x 0.40 degree box around Shippensburg, PA.
+AREA_STREET_PROBE_MAX_DEG = _env_float("AREA_STREET_PROBE_MAX_DEG", 0.4)
 
 # Overture Maps addresses (GeoParquet on public S3, read with DuckDB; no account or key).
 # Used as a fallback when NAD cannot confirm an address - it also carries county/city data

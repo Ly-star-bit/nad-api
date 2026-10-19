@@ -1,6 +1,7 @@
 """The verification pipeline against a fake upstream (no network)."""
 
 import asyncio
+import re
 
 from app.address import parse_oneline
 from app.upstream import UpstreamError, nad_record
@@ -129,18 +130,20 @@ class NotInTiger(FakeUpstream):
 
     async def nad_in_envelope(self, extent, where, limit=200):
         self.wheres.append(where)
-        return list(self.records)
+        number = re.match(r"Add_Number = (\d+) AND ", where)
+        return [r for r in self.records if not number or r["address_number_int"] == int(number.group(1))]
 
     async def resolve_coverage(self, lat, lon, county=None, state=None):
         return {"method": "point", "county": "Limestone", "state": "AL", "status_code": 10 if self.in_nad else 0,
                 "status": "Data in the NAD" if self.in_nad else "No data", "in_nad": self.in_nad}
 
 
-FANNING = nad_record({
+FANNING_ATTRS = {
     "Add_Number": 28869, "AddNo_Full": "28869 <Null>", "St_Name": "Fanning", "St_PosTyp": "Drive", "St_PosDir": "Northwest",
     "StNam_Full": "Fanning Drive Northwest", "Inc_Muni": "Huntsville", "Post_City": "MADISON", "State": "AL",
     "Zip_Code": "35756", "Latitude": 34.6576, "Longitude": -86.8094,
-})
+}
+FANNING = nad_record(FANNING_ATTRS)
 
 
 def test_city_search_finds_a_street_missing_from_tiger():
@@ -151,10 +154,19 @@ def test_city_search_finds_a_street_missing_from_tiger():
     assert up.wheres == ["Add_Number = 28869 AND St_Name LIKE '%FANNING%'"]
 
 
-def test_city_search_miss_is_not_found_with_the_reason():
-    r = run(NotInTiger([]), "28869 Nosuch Dr NW, Madison, AL")
-    assert r["status"] == "not_found"
-    assert any("ZIP areas of Madison, AL" in n for n in r["notes"])
+def test_street_missing_everywhere_is_unknown_not_absent():
+    # 1410 United Dr, Shippensburg, PA: a new building on a new street that no dataset has yet
+    up = NotInTiger([])
+    r = run(up, "28869 Nosuch Dr NW, Madison, AL")
+    assert r["status"] == "geocode_failed" and r["nad_status"] == "not_found"
+    assert any("newer than the data" in n and "ZIP areas of Madison, AL" in n for n in r["notes"])
+    assert up.wheres[-1] == "St_Name LIKE '%NOSUCH%'"  # asked whether the street itself is there
+
+
+def test_other_numbers_on_the_street_make_it_street_only():
+    neighbour = nad_record({**{k: v for k, v in FANNING_ATTRS.items() if k != "AddNo_Full"}, "Add_Number": 28860})
+    r = run(NotInTiger([neighbour]), "28869 Fanning Dr NW, Madison, AL")
+    assert r["status"] == "street_only" and r["suggestions"][0]["address_number_int"] == 28860
 
 
 def test_city_search_in_a_county_outside_nad_is_not_covered():

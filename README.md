@@ -95,8 +95,14 @@ OpenAddresses 里各县/市的原始数据，正好补上这些空白。实测�
 - NAD 的属性字段没有索引，大范围内只按门牌查会超时（实测 41 s），所以同时按街名过滤：取输入街名中最长的词做
   `St_Name LIKE '%词%'`（`Saint Charles` 归一化成 `ST CHARLES`，取 `CHARLES`），完整街名仍由本地比对逻辑核对。
   Madison 一带 0.6–9 s；休斯顿（168 个 ZIP）冷查询约 30 s。
-- 查不到时返回 `not_found`（县不在 NAD 里时是 `not_covered`），`notes` 写明查了哪些 ZIP。街名写法和 NAD 差得太多
-  （`Fifth` / `5th`）时会漏，所以这个 `not_found` 不如按坐标查的结论可靠。
+- 没找到这个门牌时，再查这片范围里有没有这条街（不限门牌，范围不超过 0.4°，`AREA_STREET_PROBE_MAX_DEG`）：
+  - 街上有别的门牌：`street_only`，`suggestions` 给出最接近的门牌（`28899 Fanning Dr NW` → 28869、28860）；
+  - 这条街在 NAD 里也没有：返回 `geocode_failed`（`nad_status` 是 `not_found`），`notes` 说明可能是比数据更新的地址，
+    或街名写错了。Census 定位不到的地址常常是新街道：`1410 United Dr, Shippensburg, PA` 是新建的
+    沃尔玛物流中心，Census、OpenStreetMap、NAD（坎伯兰县数据截至 2022-08）、Overture 都还没有这条街，
+    说它“不存在”是错的；
+  - 县不在 NAD 里：`not_covered`。
+  街名写法和 NAD 差得太多（`Fifth` / `5th`）时也会落到“没有这条街”。
 - 有些数据提供方把空字段导出成文字 `<Null>`（门牌全称 `28869 <Null>`），按空值处理，Overture 里转载的同样处理。
 
 ## 欧洲和日本
@@ -301,7 +307,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 | `street_only` | 附近有这条街，但没有这个门牌；`suggestions` 给出同街最接近的门牌 |
 | `not_found` | 该地区有数据覆盖，但无匹配 —— 较大概率是错误/虚构地址 |
 | `not_covered` | NAD 和 Overture 在该地区都没有数据，无法判断（美国以外还包括：OSM 没收录门牌、地址没有门牌号、没写城市而同名地址有多处） |
-| `geocode_failed` | Census 找不到这个地址（或拒绝了输入），而且没有 ZIP、城市也不是 Census place，无法按范围查 |
+| `geocode_failed` | Census 找不到这个地址（或拒绝了输入），而且无法按 ZIP / 城市范围查，或者查了但 NAD 里也没有这条街（可能是新地址或街名写错） |
 | `invalid_input` | 解析不出门牌号（PO Box、邮政信箱、自提柜也在此列，`notes` 会说明） |
 | `upstream_error` | 免费上游超时/故障，包括连不上 Census 地理编码 —— 这种情况不代表地址有问题 |
 
