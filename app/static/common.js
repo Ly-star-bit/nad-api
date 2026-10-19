@@ -10,7 +10,7 @@ export const STATUS = {
                     d: '这个地区有数据覆盖，却没有匹配的地址，较大概率是错误或虚构的地址。' },
   not_covered:    { t: '无法判断',   tone: 'none', brief: '数据源在该地区没有数据，或者只有 OpenStreetMap 而它没收录这个门牌。',
                     d: 'NAD 和 Overture 在这个地区都没有数据，无法判断地址是否存在。' },
-  geocode_failed: { t: '无法定位',   tone: 'none', brief: '定位服务找不到这条街或这个地名；美国地址带 ZIP 时可以按 ZIP 范围重试。',
+  geocode_failed: { t: '无法定位',   tone: 'none', brief: '定位服务找不到这条街或这个地名；美国地址按 ZIP / 城市范围查 NAD 也没有这条街（可能是新街道或街名写错）。',
                     d: 'Census 地理编码找不到这个地址，没有位置就没法在 NAD 里查找。' },
   invalid_input:  { t: '无法解析',   tone: 'none', brief: '没有识别出门牌号。',
                     d: '没有识别出门牌号，请输入完整的街道地址，例如 1700 W Washington St, Phoenix, AZ。' },
@@ -49,6 +49,14 @@ export function verdictText(r) {
   const zipNote = zipFix ? `但${zipWord(r)}不对：输入的是 ${r.parsed.zip}，记录里是 ${zipFix}。` : '';
   if (!intl(r)) {
     if (r.status === 'verified') return (r.match_level === 'unit' ? '门牌、街道和单元号都有记录。' : '门牌和街道都有记录。') + zipNote;
+    // Census could not place it, so NAD was searched by ZIP / city area (r.geocode.source 'zcta' / 'city')
+    const area = r.geocode && (r.geocode.source === 'zcta' || r.geocode.source === 'city');
+    const said = (s) => (r.notes || []).some((n) => n.includes(s));
+    if (r.status === 'geocode_failed' && said('newer than the data')) {
+      return 'Census 和 NAD 里都没有这条街，无法判断地址是否存在：可能是比数据更新的街道（新建小区、新工业园），也可能是街道名写错了。';
+    }
+    if (r.status === 'street_only' && area) return 'Census 定位不到这个地址，但 NAD 在这一带有这条街，只是没有这个门牌号。';
+    if (r.status === 'not_found' && area) return 'Census 定位不到这个地址，NAD 在这片范围里也没有这条街上的这个门牌。';
     return st.d || '';
   }
   const jp = r.country === 'JP', src = (r.provider && r.provider.name) || SOURCE[r.data_source] || '数据源';

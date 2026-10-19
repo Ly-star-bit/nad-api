@@ -257,8 +257,12 @@ function renderResult(r) {
   if (pt) h += `<section class="map-sec"><div id="map" class="map"></div>${mapKey(r)}</section>`;
 
   if (r.status === 'geocode_failed' && (r.country || 'US') === 'US') {
+    const noStreet = (r.notes || []).some((n) => n.includes('newer than the data'));
     h += `<section class="sec"><p class="hint">${r.parsed && r.parsed.zip && !zf.checked
-      ? `可以在 ZIP ${esc(r.parsed.zip)} 的范围内直接搜索门牌，需要 3–20 秒。<button type="button" class="linkbtn" data-retry-zip>按 ZIP 范围重试</button>`
+      ? (noStreet
+        ? `街道名如果可能写错了，可以查 ZIP ${esc(r.parsed.zip)} 范围内所有街道上的 ${esc(r.parsed.house_number)} 号，需要 3–20 秒。`
+        : `可以在 ZIP ${esc(r.parsed.zip)} 的范围内直接搜索门牌，需要 3–20 秒。`)
+        + `<button type="button" class="linkbtn" data-retry-zip>按 ZIP 范围重试</button>`
       : r.parsed && r.parsed.zip ? '已经按 ZIP 范围搜索过。请检查街道名和门牌号是否拼写正确。'
       : '地址里没有 ZIP。补上 ZIP 后，可以在 ZIP 范围内直接搜索门牌。'}</p></section>`;
   }
