@@ -41,7 +41,8 @@ class VerifyRequest(BaseModel):
     lat: float | None = Field(None, ge=-90, le=90, description="Skip geocoding and search around this point")
     lon: float | None = Field(None, ge=-180, le=180)
     zip_fallback: bool = Field(
-        False, description="If the Census geocoder fails, search the whole ZIP (ZCTA) area in NAD. Slower (5-20 s)."
+        False, description="If the Census geocoder fails, search the whole ZIP (ZCTA) area in NAD for this house number on any "
+        "street. Slower (5-20 s). Without it, only streets with the given name are searched in the ZIP area."
     )
     overture_fallback: bool = Field(
         True, description="When NAD cannot confirm the address (not_covered / not_found / street_only / "

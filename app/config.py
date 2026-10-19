@@ -45,6 +45,16 @@ ZCTA_LAYER_URL = os.getenv(
     "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/PUMA_TAD_TAZ_UGA_ZCTA/MapServer/1",
 )
 
+# Census TIGERweb places (layer 4: incorporated places, 5: census designated places). When Census cannot
+# geocode an address without a ZIP, NAD is searched in the ZIP areas that overlap the named city.
+PLACES_LAYER_URL = os.getenv(
+    "PLACES_LAYER_URL",
+    "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer",
+)
+# Overture is only asked when those ZIP areas fit in this many degrees each way (big cities would read a
+# large slice of the Parquet files).
+CITY_FALLBACK_OVERTURE_MAX_DEG = _env_float("CITY_FALLBACK_OVERTURE_MAX_DEG", 0.6)
+
 # Overture Maps addresses (GeoParquet on public S3, read with DuckDB; no account or key).
 # Used as a fallback when NAD cannot confirm an address - it also carries county/city data
 # (via OpenAddresses) for many areas that are missing from the NAD.

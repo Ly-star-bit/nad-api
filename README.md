@@ -9,7 +9,7 @@ NAD 查不到时用 **Overture Maps 地址数据** 兜底。**欧洲和日本**�
 | NAD FeatureServer（USDOT 托管在 ArcGIS Online） | 9,792 万条权威地址点 | 2026-06-30 编译版，季度更新 |
 | NAD County Participation Status | 判断该县/市是否已接入 NAD | 区分“地址不存在”与“该地区无数据” |
 | US Census Geocoder | 地址 → 经纬度 + 标准化 + 县 FIPS | TIGER/Line，免费无 Key |
-| Census TIGERweb ZCTA | ZIP 区域范围（仅 `zip_fallback` 时使用） | |
+| Census TIGERweb ZCTA / Places | ZIP 区域范围、城市所在的 ZIP（仅 Census 定位失败时使用） | |
 | **Overture Maps addresses**（AWS 公开 S3 上的 GeoParquet，DuckDB 直接读） | 兜底：美国约 1.25 亿条，含 NAD + OpenAddresses 的县/市原始数据 | 自动使用最新 release，每天检查一次 |
 
 ## 为什么是“先地理编码、再空间查询”
@@ -27,6 +27,11 @@ NAD 查不到时用 **Overture Maps 地址数据** 兜底。**欧洲和日本**�
         → 本地比对街道名(USPS/FGDC 归一化)/单元/ZIP/城市 → 县覆盖状态 → NAD 结论
         → NAD 结论为 not_covered / not_found / street_only / upstream_error 时：
           Overture 按 bbox(1500 m) + 门牌查询 → 同一套比对逻辑 → 结论更好则采用
+
+Census 定位失败（新建街道常见，TIGER 里还没有）：
+  有 ZIP → 在该 ZIP 范围内查 NAD（Add_Number=N 且街名含输入街名中最长的词）
+  无 ZIP → 同样的查询，范围换成和城市（Census place / CDP）重叠的所有 ZIP
+  zip_fallback=true → 在 ZIP 范围内查该门牌的所有街道（旧行为）
 ```
 
 几处细节：
@@ -66,8 +71,24 @@ OpenAddresses 里各县/市的原始数据，正好补上这些空白。实测�
 - 延迟：第一次查询要读 64 个 Parquet 文件的元数据（约 43 MB），服务启动时会在后台预热（单独的 180 s 超时，失败会在
   1 分钟、5 分钟后重试）；预热完成后每次 0.3–2 s。离 us-west-2 远、CPU 少的服务器上预热更慢，
   DuckDB 默认开 16 个线程并行下载（`OVERTURE_THREADS`）。
-- 没有位置就无法兜底：纯 `geocode_failed`（无 ZIP）不会查 Overture —— 无 bbox 的属性查询要扫 27 GB。
-  带 `zip_fallback=true` 时用 ZIP 范围作为 bbox。
+- 没有位置就无法兜底：既没有 ZIP、城市也不是 Census place 时返回 `geocode_failed`，不会查 Overture ——
+  无 bbox 的属性查询要扫 27 GB。Census 定位失败但有 ZIP 或城市时，用 ZIP 范围（或城市所在 ZIP 的合并范围）作为 bbox；
+  范围超过 0.6°（`CITY_FALLBACK_OVERTURE_MAX_DEG`，休斯顿这类大城市）时不查 Overture，提示补 ZIP。
+
+### Census 定位不到的地址
+
+例：`28869 FANNING DR NW, MADISON, AL` 所在的街道 Census 和 OpenStreetMap 都没有，但 NAD 里有
+（Alabama 911 Board 的数据，2024-12 更新；邮政城市是 Madison，实际在 Huntsville 市界内、Limestone 县，ZIP 35756）。
+
+- 地址带 ZIP：在这个 ZIP 的范围内查 NAD。
+- 不带 ZIP：先用 TIGERweb 查城市（建制市和 CDP 都查，`Harvest, AL` 是 CDP），再找和城市范围重叠的 ZIP，
+  在这些 ZIP 的合并范围内查 NAD。邮政城市常常超出市界，所以按 ZIP 找而不是按市界找。
+- NAD 的属性字段没有索引，大范围内只按门牌查会超时（实测 41 s），所以同时按街名过滤：取输入街名中最长的词做
+  `St_Name LIKE '%词%'`（`Saint Charles` 归一化成 `ST CHARLES`，取 `CHARLES`），完整街名仍由本地比对逻辑核对。
+  Madison 一带 0.6–9 s；休斯顿（168 个 ZIP）冷查询约 30 s。
+- 查不到时返回 `not_found`（县不在 NAD 里时是 `not_covered`），`notes` 写明查了哪些 ZIP。街名写法和 NAD 差得太多
+  （`Fifth` / `5th`）时会漏，所以这个 `not_found` 不如按坐标查的结论可靠。
+- 有些数据提供方把空字段导出成文字 `<Null>`（门牌全称 `28869 <Null>`），按空值处理，Overture 里转载的同样处理。
 
 ## 欧洲和日本
 
@@ -238,7 +259,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 
 参数（长度上限：`address` 300、`street` 200 个字符，超出返回 422）：`address`（单行）或 `street`+`city`/`state`/`zip`（结构化）；可选 `country`（见[欧洲和日本](#欧洲和日本)，
 不支持的国家返回 422）、`default_country`（地址里没写国家时才用）、`unit`、`lat`+`lon`（跳过地理编码）、
-`zip_fallback`（Census 编码失败时在整个 ZIP 区域搜索，较慢 3–20 s）、`overture_fallback`（默认 `true`，只影响美国地址：
+`zip_fallback`（Census 编码失败时在整个 ZIP 区域搜索该门牌的所有街道，较慢 3–20 s；不加时只查同名街道）、`overture_fallback`（默认 `true`，只影响美国地址：
 欧洲的 Overture 是主要数据源，不受它影响）、`max_candidates`。美国以外 `zip` 是邮编，日本的 `state` / `city` 用来确定都道府県和市区町村。
 
 返回要点：
@@ -271,7 +292,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 | `street_only` | 附近有这条街，但没有这个门牌；`suggestions` 给出同街最接近的门牌 |
 | `not_found` | 该地区有数据覆盖，但无匹配 —— 较大概率是错误/虚构地址 |
 | `not_covered` | NAD 和 Overture 在该地区都没有数据，无法判断（美国以外还包括：OSM 没收录门牌、地址没有门牌号、没写城市而同名地址有多处） |
-| `geocode_failed` | Census 找不到这个地址（或拒绝了输入）；带 ZIP 可加 `zip_fallback=true` 重试 |
+| `geocode_failed` | Census 找不到这个地址（或拒绝了输入），而且没有 ZIP、城市也不是 Census place，无法按范围查 |
 | `invalid_input` | 解析不出门牌号（PO Box、邮政信箱、自提柜也在此列，`notes` 会说明） |
 | `upstream_error` | 免费上游超时/故障，包括连不上 Census 地理编码 —— 这种情况不代表地址有问题 |
 
@@ -355,7 +376,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 - **Census 会“纠正”方向**：例如把 `200 N Spring St` 匹配成 `200 S SPRING ST`。匹配时以用户输入的方向为准，并在 `notes` 中提示。
 - **NAD ≠ USPS 可投递**：`verified` 只说明物理地址点存在。需要可投递性请再接 USPS/CASS 类服务。
 - 单元号覆盖取决于数据提供方，很多地区只有楼栋点，因此有 `unit_not_found` 这一中间态。
-- 依赖 Census 地理编码定位；新建地址可能不在 TIGER 中 → 用 `zip_fallback` 或直接传 `lat`/`lon`。
+- 依赖 Census 地理编码定位；新建地址可能不在 TIGER 中 → 自动按 ZIP / 城市范围查同名街道（见[上文](#census-定位不到的地址)），也可以直接传 `lat`/`lon`。
 - 威斯康星网格门牌（`N95W18000 ...`）等特殊格式暂不解析。
 - 上游是公共免费服务，冷查询偶尔 5–15 s；生产环境建议保留缓存与限流。
 - 若需高并发/离线/SLA，仍建议按州下载 NAD 自建 PostGIS（可沿用本项目的解析与匹配逻辑）。

@@ -113,3 +113,11 @@ def test_unit_written_with_its_building():
     for text in ("10 Elm St Apt B201", "10 Elm St Unit B-201", "10 Elm St Apt 201"):
         pa = parse_oneline(text)
         assert score_candidate(rec, pa, [StreetKey.from_text(pa.street_text)], None, "")["match"]["unit_match"], text
+
+
+def test_null_text_copied_from_nad_is_empty():
+    from app.overture import overture_record
+    rec = overture_record({"id": "x", "number": "28869 <Null>", "street": "Fanning Drive Northwest", "unit": "<Null>",
+                           "address_levels": [{"value": "AL"}], "dataset": "NAD"})
+    assert rec["address_number"] == "28869" and rec["address_number_suffix"] is None
+    assert rec["subaddress"]["unit"] is None

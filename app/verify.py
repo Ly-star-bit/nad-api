@@ -251,6 +251,15 @@ def decide(pa: ParsedAddress, scored: list[dict], suggestions: list[dict], *, da
     return d
 
 
+def _name_token(key: StreetKey) -> str:
+    """The street name's most distinctive word, for a LIKE filter on NAD's St_Name: the matcher compares the full
+    name afterwards. The key is normalized ('Saint Charles' -> 'ST CHARLES', '5th' -> '5'), so short words, which are
+    the ones normalization rewrites, are avoided."""
+    words = [re.sub(r"[^A-Z0-9]", "", w) for w in key.core.split()]
+    words = [w for w in words if w]
+    return max((w for w in words if len(w) >= 3), key=len, default="") or max(words, key=len, default="")
+
+
 # ---------------------------------------------------------------------------------------- NAD
 
 
@@ -465,21 +474,13 @@ async def verify_address(
     extent: dict | None = None
 
     # ---- 2. NAD -----------------------------------------------------------------------
+    overture_area = True  # whether `extent` is small enough for the Overture fallback
     if geocode is not None:
         out["geocode"] = geocode
         origin = (geocode["lat"], geocode["lon"])
         nad_dec = await _nad_near_phase(up, pa, geocode, keys, ref_zip, out, timings, max_candidates)
-    else:
-        # Optional ZIP fallback when the address is not in TIGER. Without any location, neither
-        # NAD nor Overture can be searched (an attribute-only scan would time out / read 27 GB).
-        if not (zip_fallback and pa.zip5):
-            if geocode_error:  # the geocoder was unreachable: nothing is known about the address itself
-                return finish("upstream_error")
-            if not pa.zip5:
-                notes.append("address could not be geocoded; add a ZIP code and set zip_fallback=true to search the ZIP area")
-            else:
-                notes.append("address could not be geocoded; retry with zip_fallback=true to search the whole ZIP area (slower)")
-            return finish("geocode_failed")
+    elif zip_fallback and pa.zip5:
+        # Optional ZIP fallback when the address is not in TIGER.
         t = time.perf_counter()
         try:
             extent = await up.zcta_extent(pa.zip5)
@@ -498,12 +499,67 @@ async def verify_address(
         except UpstreamError as exc:
             nad_dec = Decision(status="upstream_error", notes=[f"NAD ZIP search failed: {exc.message}"])
         timings["nad"] = round((time.perf_counter() - t) * 1000, 1)
+    elif (pa.zip5 or (pa.city and pa.state)) and not geocode_error and _name_token(user_key):
+        # Search the ZIP area (or the ZIP areas overlapping the named city) for this number on a street with this
+        # name: new streets are often missing from TIGER but already in NAD (28869 Fanning Dr NW, Madison, AL).
+        t = time.perf_counter()
+        try:
+            if pa.zip5:
+                zip_extent = await up.zcta_extent(pa.zip5)
+                area = {"zips": [pa.zip5], "extent": zip_extent} if zip_extent else None
+            else:
+                area = await up.city_area(pa.city, pa.state)
+        except UpstreamError as exc:
+            notes.append(f"{'ZIP' if pa.zip5 else 'city'} lookup failed: {exc.message}")
+            return finish("upstream_error")
+        if not area:
+            notes.append(f"ZIP {pa.zip5} not found in Census ZCTAs" if pa.zip5 else
+                         f"address could not be geocoded and '{pa.city}, {pa.state}' is not a Census place; "
+                         "add a ZIP code to search the ZIP area")
+            return finish("geocode_failed")
+        extent = area["extent"]
+        if pa.zip5:
+            out["geocode"] = {"source": "zcta", "zip": pa.zip5, "extent": extent}
+            where = f"ZIP {pa.zip5}"
+        else:
+            out["geocode"] = {"source": "city", "city": pa.city, "state": pa.state, "zips": area["zips"], "extent": extent}
+            zips = area["zips"]
+            where = (f"the ZIP areas of {pa.city}, {pa.state} ({', '.join(zips[:8])}"
+                     + (f" and {len(zips) - 8} more" if len(zips) > 8 else "") + ")")
+        try:
+            recs = await up.nad_in_envelope(
+                extent, f"Add_Number = {pa.house.number} AND St_Name LIKE '%{_name_token(user_key)}%'")
+            scored = _rank([score_candidate(r, pa, keys, None, ref_zip) for r in recs])
+            center = ((extent["ymin"] + extent["ymax"]) / 2, (extent["xmin"] + extent["xmax"]) / 2)
+            coverage = None if _street_matched(scored) else await _coverage(up, {"state": pa.state}, *center)
+            out["coverage"] = coverage
+            nad_dec = decide(pa, scored, [], dataset="NAD", ref_zip=ref_zip, max_candidates=max_candidates,
+                             coverage=coverage,
+                             empty_note=f"address could not be geocoded, and NAD has no {pa.house.number} on a street "
+                                        f"named like '{pa.street_text}' in {where}")
+        except UpstreamError as exc:
+            nad_dec = Decision(status="upstream_error", notes=[f"NAD street search failed: {exc.message}"])
+        timings["nad"] = round((time.perf_counter() - t) * 1000, 1)
+        if max(extent["xmax"] - extent["xmin"], extent["ymax"] - extent["ymin"]) > config.CITY_FALLBACK_OVERTURE_MAX_DEG:
+            overture_area = False
+    else:
+        # Without any location, neither NAD nor Overture can be searched (an attribute-only scan would
+        # time out / read 27 GB).
+        if geocode_error:  # the geocoder was unreachable: nothing is known about the address itself
+            return finish("upstream_error")
+        if not pa.zip5:
+            notes.append("address could not be geocoded; add a ZIP code and set zip_fallback=true to search the ZIP area")
+        else:
+            notes.append("address could not be geocoded; retry with zip_fallback=true to search the whole ZIP area (slower)")
+        return finish("geocode_failed")
 
     apply(nad_dec, "nad")
     out["nad_status"] = nad_dec.status
 
     # ---- 3. Overture fallback -----------------------------------------------------------
-    if overture is not None and overture_fallback and nad_dec.status in FALLBACK_TRIGGERS:
+    if overture is not None and overture_fallback and nad_dec.status in FALLBACK_TRIGGERS and not overture_area:
+        notes.append("the search area is too large for the Overture fallback" + ("" if pa.zip5 else "; add a ZIP code"))
+    elif overture is not None and overture_fallback and nad_dec.status in FALLBACK_TRIGGERS:
         info: dict[str, Any] = {"provider": "overture", "release": None, "triggered_by": nad_dec.status,
                                 "status": None, "adopted": False, "error": None}
         out["fallback"] = info

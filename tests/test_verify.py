@@ -103,3 +103,91 @@ def test_bracketing_with_house_number_suffixes():
     r = run(up, "12A W Washington St, Phoenix, AZ 85007")
     assert r["status"] == "verified" and up.searches == [300]
     assert any("suffix differs" in n for n in r["notes"])
+
+
+class NotInTiger(FakeUpstream):
+    """Census has no match (a new street); NAD has it in a ZIP area of the named city."""
+
+    def __init__(self, records=(), area=True, city_error=None, in_nad=True):
+        super().__init__()
+        self.records = list(records)
+        self.area = area
+        self.city_error = city_error
+        self.in_nad = in_nad
+        self.wheres = []
+
+    async def census_geocode_oneline(self, text):
+        return None
+
+    async def city_area(self, city, state):
+        if self.city_error:
+            raise UpstreamError("tigerweb", self.city_error)
+        return {"zips": ["35756", "35757"], "extent": {"xmin": -86.9, "ymin": 34.5, "xmax": -86.6, "ymax": 34.9}} if self.area else None
+
+    async def zcta_extent(self, zip5):
+        return {"xmin": -86.9, "ymin": 34.5, "xmax": -86.7, "ymax": 34.7}
+
+    async def nad_in_envelope(self, extent, where, limit=200):
+        self.wheres.append(where)
+        return list(self.records)
+
+    async def resolve_coverage(self, lat, lon, county=None, state=None):
+        return {"method": "point", "county": "Limestone", "state": "AL", "status_code": 10 if self.in_nad else 0,
+                "status": "Data in the NAD" if self.in_nad else "No data", "in_nad": self.in_nad}
+
+
+FANNING = nad_record({
+    "Add_Number": 28869, "AddNo_Full": "28869 <Null>", "St_Name": "Fanning", "St_PosTyp": "Drive", "St_PosDir": "Northwest",
+    "StNam_Full": "Fanning Drive Northwest", "Inc_Muni": "Huntsville", "Post_City": "MADISON", "State": "AL",
+    "Zip_Code": "35756", "Latitude": 34.6576, "Longitude": -86.8094,
+})
+
+
+def test_city_search_finds_a_street_missing_from_tiger():
+    up = NotInTiger([FANNING])
+    r = run(up, "28869 FANNING DR NW,MADISON,AL US")
+    assert r["status"] == "verified" and r["data_source"] == "nad"
+    assert r["geocode"]["source"] == "city" and "35756" in r["geocode"]["zips"]
+    assert up.wheres == ["Add_Number = 28869 AND St_Name LIKE '%FANNING%'"]
+
+
+def test_city_search_miss_is_not_found_with_the_reason():
+    r = run(NotInTiger([]), "28869 Nosuch Dr NW, Madison, AL")
+    assert r["status"] == "not_found"
+    assert any("ZIP areas of Madison, AL" in n for n in r["notes"])
+
+
+def test_city_search_in_a_county_outside_nad_is_not_covered():
+    assert run(NotInTiger([], in_nad=False), "28869 Nosuch Dr, Madison, AL")["status"] == "not_covered"
+
+
+def test_city_search_needs_a_known_city():
+    r = run(NotInTiger([FANNING], area=False), "28869 Fanning Dr NW, Madisonn, AL")
+    assert r["status"] == "geocode_failed"
+    assert any("not a Census place" in n for n in r["notes"])
+    up = NotInTiger([FANNING])
+    assert run(up, "28869 Fanning Dr NW")["status"] == "geocode_failed" and up.wheres == []
+
+
+def test_city_lookup_outage_is_an_upstream_error():
+    r = run(NotInTiger([FANNING], city_error="HTTP 503"), "28869 Fanning Dr NW, Madison, AL")
+    assert r["status"] == "upstream_error"
+
+
+def test_name_token_survives_normalization():
+    from app.address import StreetKey
+    from app.verify import _name_token
+    assert _name_token(StreetKey.from_text("Saint Charles Ave")) == "CHARLES"
+    assert _name_token(StreetKey.from_text("W 5th St")) == "5"
+    assert _name_token(StreetKey.from_text("O'Neal Rd")) == "NEAL"  # LIKE '%NEAL%' still finds O'Neal
+
+
+def test_zip_without_zip_fallback_searches_the_street_in_that_zip():
+    up = NotInTiger([FANNING])
+    r = run(up, "28869 Fanning Dr NW, Madison, AL 35756")
+    assert r["status"] == "verified" and r["geocode"] == {"source": "zcta", "zip": "35756", "extent": r["geocode"]["extent"]}
+    assert up.wheres == ["Add_Number = 28869 AND St_Name LIKE '%FANNING%'"]
+    # zip_fallback=true keeps searching every street in the ZIP
+    up = NotInTiger([FANNING])
+    asyncio.run(verify_address(up, parse_oneline("28869 Fanning Dr NW, Madison, AL 35756"), overture=None, zip_fallback=True))
+    assert up.wheres == ["Add_Number = 28869 AND Zip_Code = '35756'"]

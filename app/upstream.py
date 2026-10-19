@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections import OrderedDict
 from datetime import datetime, timezone
@@ -368,6 +369,43 @@ class Upstream:
             return None
         return {k: ext[k] for k in ("xmin", "ymin", "xmax", "ymax")}
 
+    # ------------------------------------------------------------------ city -> ZIP areas
+
+    async def city_area(self, city: str, state: str) -> dict | None:
+        """ZIP areas (ZCTAs) overlapping a Census place, for addresses Census cannot geocode and that carry no ZIP.
+        Postal cities reach past city limits (28869 Fanning Dr NW, MADISON, AL is in Huntsville), which the
+        overlapping ZIP areas cover. None when the city is not a Census place in that state."""
+        fips = _FIPS_BY_STATE.get(state.upper())
+        name = re.sub(r"[^A-Z0-9 .'-]", "", " ".join(city.upper().split())).replace("'", "''")
+        if not fips or not name:
+            return None
+        where = f"UPPER(BASENAME)='{name}' AND STATE='{fips}'"
+        found = await asyncio.gather(*(
+            self._get_json("tigerweb", f"{config.PLACES_LAYER_URL}/{layer}/query",
+                           {"where": where, "returnExtentOnly": "true", "returnCountOnly": "true", "outSR": 4326, "f": "json"})
+            for layer in (4, 5)  # incorporated places, then census designated places (Harvest, AL)
+        ))
+        extents = [d["extent"] for d in found if d.get("count") and (d.get("extent") or {}).get("xmin") not in (None, "NaN")]
+        if not extents:
+            return None
+        place = {"xmin": min(e["xmin"] for e in extents), "ymin": min(e["ymin"] for e in extents),
+                 "xmax": max(e["xmax"] for e in extents), "ymax": max(e["ymax"] for e in extents)}
+        envelope = {
+            "geometry": json.dumps({**place, "spatialReference": {"wkid": 4326}}), "geometryType": "esriGeometryEnvelope",
+            "inSR": 4326, "spatialRel": "esriSpatialRelIntersects", "f": "json",
+        }
+        zips, ext = await asyncio.gather(
+            self._get_json("tigerweb", f"{config.ZCTA_LAYER_URL}/query",
+                           {**envelope, "outFields": "ZCTA5", "returnGeometry": "false"}),
+            self._get_json("tigerweb", f"{config.ZCTA_LAYER_URL}/query",
+                           {**envelope, "returnExtentOnly": "true", "outSR": 4326}),
+        )
+        zips = sorted({(f.get("attributes") or {}).get("ZCTA5") for f in zips.get("features") or []} - {None})
+        ext = ext.get("extent") or {}
+        if not zips or ext.get("xmin") in (None, "NaN"):
+            return None
+        return {"zips": zips, "extent": {k: ext[k] for k in ("xmin", "ymin", "xmax", "ymax")}}
+
 
 # ---------------------------------------------------------------------- helpers
 
@@ -420,10 +458,15 @@ def _ms_to_date(value: Any) -> str | None:
     return None
 
 
+# Some partners export empty fields as the text "<Null>", alone or inside AddNo_Full ("28869 <Null>",
+# Alabama 911 Board), which made every such number look like it had a suffix.
+_NULL_TEXT_RE = re.compile(r"\s*<null>\s*", re.IGNORECASE)
+
+
 def _s(value: Any) -> str | None:
     if value is None:
         return None
-    value = str(value).strip()
+    value = _NULL_TEXT_RE.sub(" ", str(value)).strip()
     return value or None
 
 
@@ -496,3 +539,4 @@ STATE_FIPS = {
     "45": "SC", "46": "SD", "47": "TN", "48": "TX", "49": "UT", "50": "VT", "51": "VA", "53": "WA",
     "54": "WV", "55": "WI", "56": "WY", "72": "PR", "78": "VI", "66": "GU", "60": "AS", "69": "MP",
 }
+_FIPS_BY_STATE = {abbr: fips for fips, abbr in STATE_FIPS.items()}

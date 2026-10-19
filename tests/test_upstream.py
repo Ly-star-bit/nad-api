@@ -95,3 +95,12 @@ def test_identical_requests_in_flight_share_one_call():
         srv.shutdown()
     assert all(r == {"ok": True} for r in same) and other == cached == {"ok": True}
     assert len(hits) == 2  # five identical concurrent calls -> one request; the different one -> one; then cache
+
+
+def test_null_text_from_partner_exports_is_empty():
+    # Alabama 911 Board records: AddNo_Full "28869 <Null>", AddNum_Suf "<Null>"
+    from app.upstream import nad_record
+    rec = nad_record({"Add_Number": 28869, "AddNo_Full": "28869 <Null>", "AddNum_Suf": "<Null>",
+                      "St_Name": "Fanning", "StNam_Full": "Fanning Drive Northwest", "State": "AL"})
+    assert rec["address_number"] == "28869"
+    assert rec["address_number_suffix"] is None

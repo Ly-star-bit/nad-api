@@ -20,7 +20,7 @@ import duckdb
 import httpx
 
 from . import config
-from .upstream import TTLCache, UpstreamError, _describe
+from .upstream import TTLCache, UpstreamError, _describe, _s
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +47,8 @@ def overture_record(row: dict) -> dict:
     city = (levels[1] if len(levels) > 1 else None) or row.get("postal_city")
     postcode = (row.get("postcode") or "").strip() or None
     zip5, zip4 = (postcode[:5], postcode[6:10] or None) if postcode and len(postcode) > 5 else (postcode, None)
-    number, street, unit = row.get("number"), row.get("street"), row.get("unit")
+    # Overture copies NAD verbatim, including its "<Null>" text ("28869 <Null>")
+    number, street, unit = _s(row.get("number")), _s(row.get("street")), _s(row.get("unit"))
     num_int, num_suf = _parse_number(number)
     dataset = row.get("dataset")
     line1 = " ".join(p for p in (number, street) if p)

@@ -405,6 +405,7 @@ function fields(r) {
   if (g) {
     add('地理编码', g.source === 'census' ? `Census${SEP}<span class="mono">${esc(g.matched_address)}</span>`
       : g.source === 'zcta' ? `Census 未能定位，按 ZIP ${esc(g.zip)} 的范围搜索`
+      : g.source === 'city' ? `Census 未能定位，按 ${esc(g.city)}, ${esc(g.state)} 所在的 ZIP（${(g.zips || []).map(esc).join(', ')}）搜索同名街道`
       : GEO[g.source] ? `${GEO[g.source]}${SEP}<span class="mono">${esc(g.matched_address || '')}</span>` : '使用传入的坐标');
   }
   if (c) {
