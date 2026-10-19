@@ -191,3 +191,20 @@ def test_zip_without_zip_fallback_searches_the_street_in_that_zip():
     up = NotInTiger([FANNING])
     asyncio.run(verify_address(up, parse_oneline("28869 Fanning Dr NW, Madison, AL 35756"), overture=None, zip_fallback=True))
     assert up.wheres == ["Add_Number = 28869 AND Zip_Code = '35756'"]
+
+
+class EmptyOverture:
+    """Overture with no address points in the area (Savannah, GA)."""
+
+    async def release(self, refresh=False):
+        return "2026-09-23.1"
+
+    async def query(self, bbox, number=None, limit=5000, timeout=None, any_part=False):
+        return []
+
+
+def test_overture_miss_over_an_area_keeps_not_covered():
+    # Georgia is not in NAD and Overture has nothing around Port Wentworth: still "can't tell", not "doesn't exist"
+    up = NotInTiger([], in_nad=False)
+    r = asyncio.run(verify_address(up, parse_oneline("120 CROSSGATE DR,PORT WENTWORTH,GA US"), overture=EmptyOverture()))
+    assert r["status"] == "not_covered" and r["fallback"]["status"] == "not_found" and not r["fallback"]["adopted"]

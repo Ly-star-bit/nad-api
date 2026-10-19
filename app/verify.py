@@ -573,7 +573,9 @@ async def verify_address(
             notes.append(f"Overture fallback failed: {exc.message}")
         else:
             info["status"] = ov_dec.status
-            if STATUS_RANK[ov_dec.status] > STATUS_RANK[nad_dec.status]:
+            # Searched over a whole ZIP / city area, a miss only shows Overture has no point there - often no data
+            # at all (Savannah, GA) - so it must not replace NAD's not_covered with not_found.
+            if STATUS_RANK[ov_dec.status] > STATUS_RANK[nad_dec.status] and (origin or ov_dec.verified):
                 info["adopted"] = True
                 ov_dec.confidence = round(ov_dec.confidence * 0.9, 3)  # not the authoritative NAD
                 src = (ov_dec.best_match or {}).get("source")

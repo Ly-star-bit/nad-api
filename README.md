@@ -80,7 +80,9 @@ OpenAddresses 里各县/市的原始数据，正好补上这些空白。实测�
   DuckDB 默认开 16 个线程并行下载（`OVERTURE_THREADS`）。
 - 没有位置就无法兜底：既没有 ZIP、城市也不是 Census place 时返回 `geocode_failed`，不会查 Overture ——
   无 bbox 的属性查询要扫 27 GB。Census 定位失败但有 ZIP 或城市时，用 ZIP 范围（或城市所在 ZIP 的合并范围）作为 bbox；
-  范围超过 0.6°（`CITY_FALLBACK_OVERTURE_MAX_DEG`，休斯顿这类大城市）时不查 Overture，提示补 ZIP。
+  范围超过 1.5°（`CITY_FALLBACK_OVERTURE_MAX_DEG`；休斯顿整个城市 1.05° × 0.89°，Overture 查询 2–3 s）时不查 Overture，提示补 ZIP。
+  按范围查时 Overture 只有找到地址才采用：范围内没有这个门牌往往只是 Overture 在那里没有数据（萨凡纳一带就是），
+  不能把 NAD 的 `not_covered`（无法判断）换成 `not_found`。
 
 ### Census 定位不到的地址
 

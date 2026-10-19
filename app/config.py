@@ -51,9 +51,9 @@ PLACES_LAYER_URL = os.getenv(
     "PLACES_LAYER_URL",
     "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer",
 )
-# Overture is only asked when those ZIP areas fit in this many degrees each way (big cities would read a
-# large slice of the Parquet files).
-CITY_FALLBACK_OVERTURE_MAX_DEG = _env_float("CITY_FALLBACK_OVERTURE_MAX_DEG", 0.6)
+# Overture is only asked when those ZIP areas fit in this many degrees each way. All of Houston's (1.05 x 0.89)
+# takes 2-3 s once the metadata is warm.
+CITY_FALLBACK_OVERTURE_MAX_DEG = _env_float("CITY_FALLBACK_OVERTURE_MAX_DEG", 1.5)
 
 # Overture Maps addresses (GeoParquet on public S3, read with DuckDB; no account or key).
 # Used as a fallback when NAD cannot confirm an address - it also carries county/city data
