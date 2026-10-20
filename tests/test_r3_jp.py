@@ -311,12 +311,16 @@ def test_r3_38_postcode_after_chinese_text_matches(jp, text):
     ("田村 京都府 京都市中京区上本能寺前町488", "京都府京都市中京区上本能寺前町", [488], "田村"),
     ("中村 神奈川県 横浜市中区本町6-50-10", "神奈川県横浜市中区本町", [6, 50, 10], "中村"),
     ("中村太郎 東京都　新宿区西新宿2-8-1", "東京都新宿区西新宿", [2, 8, 1], "中村太郎"),
-    ("5F 東京都 新宿区西新宿2-8-1", "東京都新宿区西新宿", [2, 8, 1], "5F"),
     ("中村太郎 東京都新宿区西新宿2-8-1", "東京都新宿区西新宿", [2, 8, 1], "中村太郎"),
 ])
 def test_r3_39_name_before_the_prefecture_and_a_space(text, prefix, nums, name):
     a = japan.parse_jp(text)
     assert (a.prefix, a.nums, a.read_as) == (prefix, nums, name)
+
+
+def test_r3_39_floor_before_the_prefecture_is_the_building():  # the floor of the building, not a name to drop
+    a = japan.parse_jp("5F 東京都 新宿区西新宿2-8-1")
+    assert (a.prefix, a.nums, a.rest, a.read_as) == ("東京都新宿区西新宿", [2, 8, 1], "5F", "")
 
 
 def test_r3_39_building_after_the_address_stays():

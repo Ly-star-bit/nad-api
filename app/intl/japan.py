@@ -210,17 +210,39 @@ def _postcode(t: str) -> tuple[str, int, int] | None:
     return None
 
 
+# A building or room written before the address ("サンハイツ101 東京都…", "5F 大阪市北区…", "101号室 …"): a building
+# word, a floor, or a name with a room number - not a bare number or "注文123456", which are order or customer numbers
+_BUILDING_RE = re.compile(r"ビル|マンション|ハイツ|ハイム|コーポ|レジデンス|タワー|アパート|メゾン|ヒルズ|パレス|プラザ|"
+                          r"コート|ハウス|荘|寮|棟|号室|階|^\d{1,3}\s*[FＦ]$")
+_ROOM_NAME_RE = re.compile(r"(?P<name>[ァ-ヶーA-Za-z]{2,})[\s・]*\d{1,4}[A-Za-z]?")
+
+
+def _building(head: str) -> bool:
+    if _HONORIFIC_RE.search(head):
+        return False
+    m = _ROOM_NAME_RE.fullmatch(head)
+    return bool(_BUILDING_RE.search(head) or m and m.group("name").upper() not in ("NO", "TEL", "FAX"))
+
+
 def _parse_kanji(a: JpAddress, t: str) -> JpAddress:
     if k := _KYOTO_RE.search(t):
         a.read_as = "; ".join(p for p in (a.read_as, k.group()) if p)
         t = (t[: k.start()] + t[k.end():]).strip()
     # "山田太郎様 東京都…", "株式会社ABC 東京都…": the address starts at the prefecture (unless it is written last,
     # "本町1-1-1, 中央区, 大阪府", or is part of a building after the address: "新宿区西新宿2-8-1 東京都庁第一本庁舎")
+    building = ""  # written before the address: still the address's building, kept with the room after the numbers
     if (p := _PREF_RE.search(t)) and p.start() > 0 and re.search(r"\d", t[p.end():]):
         head = t[: p.start()].strip(" ,、")
         if head and (not re.search(r"[\d市区町村郡]", head) or re.match(r"[\s、,]*[^\s\d、,]{1,8}?[市区郡町村]", t[p.end():])):
-            a.read_as = "; ".join(x for x in (a.read_as, head) if x)
+            if _building(head):
+                building = head
+            else:
+                a.read_as = "; ".join(x for x in (a.read_as, head) if x)
             t = t[p.start():]
+    # no prefecture, a numbered building first ("サンハイツ101 世田谷区世田谷4-21-27"): its number is not the 番地
+    if not building and not _PREF_RE.search(t) and (w := re.match(r"\s*([^\s,、]+)[\s,、]+(?=[^\s\d,、]{1,8}?[市区郡][^\s,、]*\d)", t)) \
+            and re.search(r"\d", w.group(1)) and _building(w.group(1)):
+        building, t = w.group(1), t[w.end():]
     t = _kanji_before(t, "丁目|番地|番|号|条|線|地割")
     t = re.sub(rf"(?<=\d)(番地|番)の([{_KANJI_NUM}]+)", lambda m: f"{m.group(1)}-{kanji_int(m.group(2))}", t)  # 九七八番地の六
     t = re.sub(r"\s*-\s*", "-", t)
@@ -244,7 +266,11 @@ def _parse_kanji(a: JpAddress, t: str) -> JpAddress:
         if keep is None or any(re.search(r"[都道府県市区郡]$", w) for w in words[:keep]):
             keep = next((i for i, w in enumerate(words) if re.search(r"[市区町村郡]", w) and not _HONORIFIC_RE.search(w)), None)
         if keep:
-            a.read_as = "; ".join(x for x in (a.read_as, " ".join(words[:keep])) if x)
+            head = " ".join(words[:keep])
+            if _building(head):
+                building = head
+            else:
+                a.read_as = "; ".join(x for x in (a.read_as, head) if x)
             words = words[keep:]
     a.prefix = "".join(words)
     pos, marks = start, []
@@ -273,6 +299,7 @@ def _parse_kanji(a: JpAddress, t: str) -> JpAddress:
         if town:
             a.prefix = town
             a.rest = " ".join(x for x in parts if x not in hints and x != town)
+    a.rest = " ".join(x for x in (building, a.rest) if x)
     _cap(a)
     return a
 

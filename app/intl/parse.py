@@ -488,9 +488,21 @@ def _place_shape(text: str) -> bool:
         and not _street_word(text)
 
 
+def _unit_after_town(text: str) -> tuple[str, str] | None:
+    """'Berlin Wohnung 5' -> ('Berlin', 'Wohnung 5'), 'Amsterdam 3 hoog' -> ('Amsterdam', '3 hoog'): a flat or floor
+    written after the town."""
+    plain = _plain(text)
+    for m in _UNIT_RE.finditer(plain):
+        town, unit = text[: m.start()].strip(" ,-"), text[m.start():].strip()
+        if town and not re.search(r"\d", town) and _place_shape(town) and is_unit_line(unit):
+            return town, unit
+    return None
+
+
 def _find_postcode(a: IntlAddress, segs: list[str], c: Country) -> list[str]:
     """Postcode and town, searched from the end ("..., 10117 Berlin", "London SW1A 2AA", "Rīga, LV-1050", or first:
-    "80331 München, Hauptstraße 12") -> the remaining parts."""
+    "80331 München, Hauptstraße 12") -> the remaining parts. A flat after the town ("10117 Berlin Wohnung 5") is
+    returned as a part of its own."""
     rx = _pc_regex(c)
     for i in range(len(segs) - 1, -1, -1):
         seg = segs[i]
@@ -499,7 +511,16 @@ def _find_postcode(a: IntlAddress, segs: list[str], c: Country) -> list[str]:
             continue
         m = found[-1]
         before, after = seg[: m.start()].strip(" ,"), seg[m.end():].strip(" ,")
+        if cut := _unit_after_town(after):
+            after, unit = cut
+            return _find_postcode(a, segs[:i] + [f"{before} {m.group()} {after}".strip()] + segs[i + 1:], c) + [unit]
         if len(segs) == 1:
+            if before and not re.search(r"\d", before) and _place_shape(before) and not _not_town(before, c) \
+                    and (r := _read_town(before, c)) and _place_name(before, r, c):  # not "Max Mustermann 10117 ..."
+                street, number, _unit, rest = _split(after, c)
+                if number and re.search(r"[^\W\d_]", street) and not rest:  # "Berlin 10117 Unter den Linden 77"
+                    a.postcode, a.city = m.group("pc").upper(), before
+                    return [after]
             if not before and (_place_shape(after) or _district(after)):  # only the town is left ("Postfach 12 34, 10115 Berlin")
                 a.postcode, a.city = m.group("pc").upper(), after
                 return []

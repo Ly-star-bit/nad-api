@@ -480,6 +480,10 @@ _COUNTRY_ONLY_RE = re.compile(r"^(?:U\.?\s?S\.?(?:\s?A\.?)?|UNITED\s+STATES(?:\s
 # Without commas, the city / state / ZIP written first: "MADISON AL 35756 28869 FANNING DR NW"
 _PLACE_FIRST_RE = re.compile(r"^(?P<city>[^\d,]+?)\s+(?P<state>[A-Z]{2})(?:\s+(?P<zip>\d{5}(?:-?\d{4})?))?"
                              r"\s+(?P<street>\d+[A-Z]?\s+.*[A-Z].*)$", re.I)
+# A state code and a full ZIP inside a line without commas: "CA 95814 Sacramento 980 9th St", "... CA 95814 Ste 1750"
+_STATE_ZIP_IN_RE = re.compile(r"\b([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\b", re.I)
+# Without commas, the city before the house number: "Sacramento 980 9th St"
+_CITY_FIRST_RE = re.compile(r"^(?P<city>[A-Z][^\d,#]*?)\s+(?P<street>\d+[A-Z]?\s+.+)$", re.I)
 # Order of the parts in a US address; a part of a lower rank after a higher one means the parts were shuffled.
 _RANK = {"street": 0, "unit": 1, "place": 2, "state": 3, "zip": 4, "country": 5}
 
@@ -525,6 +529,34 @@ def _reorder(parts: list[str]) -> tuple[list[str], str | None]:
     return out, note
 
 
+def _state_zip_to_end(line: str) -> str | None:
+    """'CA 95814 Sacramento 980 9th St' / '980 9th St Sacramento CA 95814 Ste 1750' -> the line with the state and
+    ZIP moved to its end, where the rest of the parser reads them; None when they already end it (or aren't there).
+    Only a state code with a full 5-digit ZIP is moved: a state name or a 3-digit number can be part of a street."""
+    if _state_zip_tail(line):
+        return None
+    found = [m for m in _STATE_ZIP_IN_RE.finditer(line) if len(m.group(1)) == 2 and state_abbr(m.group(1))]
+    if not found:
+        return None
+    m = found[-1]
+    rest = f"{line[: m.start()].strip()} {line[m.end():].strip()}".strip()
+    return f"{rest} {m.group().upper()}" if rest else None
+
+
+def _city_first(line: str) -> tuple[str, str] | None:
+    """'Sacramento 980 9th St' -> ('Sacramento', '980 9th St'): the city written before the house number, taken only
+    when a street-type word follows the number (not 'Apt 5 100 Main St', 'PO Box 12 Springfield')."""
+    m = _CITY_FIRST_RE.match(line)
+    if not m or _HOUSE_NUMBER_RE.match(line) or _PO_BOX_RE.match(line):
+        return None
+    city, street = m.group("city").strip(), m.group("street")
+    if clean(city).split()[-1] in UNIT_DESIGNATORS or clean(city) in STATE_NAMES or len(clean(city)) == 2:
+        return None
+    if not any(t in SUFFIXES for t in clean(street).split()[1:]):
+        return None
+    return city, street
+
+
 def parse_oneline(text: str) -> ParsedAddress:
     """Best-effort split of '1700 W Washington St Apt 2, Phoenix, AZ 85007'."""
     raw = prep(text)
@@ -532,11 +564,14 @@ def parse_oneline(text: str) -> ParsedAddress:
     if not raw:
         return pa
     parts = [p.strip() for p in _COUNTRY_RE.sub(r"\1", raw).split(",") if p.strip()]
+    shuffled = False  # a line without commas read in another order: said once its parts are known
     if len(parts) == 1:
         m = _PLACE_FIRST_RE.match(parts[0])
         if m and state_abbr(m.group("state")) and len(clean(m.group("state"))) == 2:
             parts = [m.group("street"), m.group("city"), " ".join(p for p in (m.group("state"), m.group("zip")) if p)]
             pa.warnings.append(f"address parts were out of order; read as '{', '.join(parts)}'")
+        elif moved := _state_zip_to_end(parts[0]):
+            parts, shuffled = [moved], True
     else:
         parts, note = _reorder(parts)
         pa.warnings += [note] if note else []
@@ -572,9 +607,15 @@ def parse_oneline(text: str) -> ParsedAddress:
         if tail:
             pa.city = tail[0]
 
+    if not tail and (cf := _city_first(street_line)):
+        pa.city, street_line = cf
+        shuffled = True
     street_line, pa.unit, pa.unit_raw = extract_unit(street_line)
     if not tail and not pa.city:
         street_line, pa.city = _split_trailing_city(street_line)
+    if shuffled:
+        read = [" ".join(p for p in (street_line, pa.unit_raw) if p), pa.city, f"{pa.state} {pa.zip5}".strip()]
+        pa.warnings.append(f"address parts were out of order; read as '{', '.join(p for p in read if p)}'")
     pa.house, pa.street_text = parse_house_number(street_line)
     if pa.house is None:
         pa.warnings.append(_no_number_warning(street_line))

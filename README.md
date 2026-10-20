@@ -55,7 +55,10 @@ Census 定位失败（新建街道常见，TIGER 里还没有）：
 - **顺序乱了的地址**：按逗号分段后逐段判断是门牌街道、单元、城市、州、ZIP 还是国家，顺序不对时按
   “门牌 街道, 单元, 城市, 州 ZIP” 重排，`notes` 里写明按什么顺序读的：`MADISON, AL, 28869 FANNING DR NW`、
   `28869 FANNING DR NW, AL, MADISON`、`Apt 5, 100 Main St, ...`、`62701, IL, Springfield, 100 Main St` 都能读对。
-  没有逗号时只认“城市 州 [ZIP] 门牌 街道”（`MADISON AL 35756 28869 FANNING DR NW`）。街道前、后都有其他段时，
+  没有逗号时以“州代码 + 5 位 ZIP”为锚点：它写在开头、中间都行（`CA 95814 Sacramento 980 9th St`、
+  `980 9th St CA 95814 Sacramento`），后面跟着的单元也能认出（`980 9th St Sacramento CA 95814 Ste 1750`）；
+  城市可以写在门牌前面（`Sacramento 980 9th St CA 95814`），但门牌后面要有街道类型词，`Apt 5 100 Main St`、
+  `PO Box 12 Springfield` 里门牌前的词不当城市。街道前、后都有其他段时，
   街道前的是收件人或公司名（`Acme Corp, 100 Main St, Springfield, IL`），忽略并提示。门牌写在街名后面
   （`FANNING DR NW 28869`）不处理：末尾的 5 位数也可能是 ZIP，`Route 66` 这类街名也以数字结尾。
   不带逗号时街道类型后的简写方向归街道（`Fanning Dr NW Madison`），全拼的归城市（`Main St North Miami`）。
@@ -175,6 +178,8 @@ OpenAddresses 里各县/市的原始数据，正好补上这些空白。实测�
   `Gal`、`c.` 等）、容忍省略名字的人名街道（`ul. Kościuszki` = `ul. Tadeusza Kościuszki`）和词序（`VIA VERDI GIUSEPPE`）；
   罗马数字、数字、数词和序数词视为相同（`Via XX Settembre` / `Via Venti Settembre`，`Vittorio Emanuele II` / `SECONDO`），
   双语街名（布鲁塞尔 `Grote Markt - Grand-Place`）分开比。门牌区间（`48/50`）包含其中同侧的门牌。
+- 没有逗号时，城市和邮编可以写在街道前面（`Berlin 10117 Unter den Linden 77`、`Paris 75002 12 rue de la Paix`），
+  城市后面的单元（`... 10117 Berlin Wohnung 5`、`... 1012 LG Amsterdam 3 hoog`）归单元，不并进城市名。
 - 地址解析能处理订单里常见的写法：街名和门牌之间的逗号（`Calle de Alcalá, 45`、`12, rue de la Paix 75002 Paris`）、
   `nº` / `Nr.`、城市写在前面（`Debrecen, Váci utca 10.`、`80331 München, ...`）、`Praha 2` / `Dublin 2` 这类区名、城区和郡
   （`Damrak 1, Centrum, Amsterdam`、`Kinsale, Co. Cork` 取真正的城市）、丢了前导 0 的邮编（`1067 Dresden` 读作 01067，
@@ -206,7 +211,8 @@ OpenAddresses 里各县/市的原始数据，正好补上这些空白。实测�
 - 地址前后的收件人、公司、`住所：` 等标签和电话号码（需要有区号的 0 或 `TEL` 标签，`1-1 1203` 的 1203 是房间号）会去掉；
   楼名里的都道府県名（`東京都庁`、`北海道大学`）不会截断地址；京都的 `寺町通御池上る` 这种走法只去掉通名部分，保留区名；
   汉数字的番地（`六二五番地`、`九七八番地の六`）照常读；简体字（`东京都`、`神奈川县`）查不到时换成日文汉字再查。
-  房间号、楼名（`101号室`、`5F`、`-101`）不参与核对。
+  房间号、楼名（`101号室`、`5F`、`-101`）不参与核对。写在地址前面的楼名、房间号（`サンハイツ101 東京都世田谷区…`、
+  `5F 東京都…`，有数字或 ビル / マンション / ハイツ 这类词）和写在后面的一样保留在地址 2，不当收件人去掉。
 - 邮编表（日本邮政的 `utf_ken_all`、罗马字表和大企业邮编表，共约 5 MB）由后台任务下载到 `NAD_DATA_DIR`（默认 `data/`），
   每月更新，下载失败时按 1 分钟起翻倍的间隔重试；请求从不等待下载。没加载好时，日文地址照常核对（只是不核对邮编），
   罗马字地址返回 `upstream_error`。每个 worker 加载后约占 170 MB 内存（默认 2 个 worker 约 340 MB）。
@@ -387,7 +393,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 ## 测试
 
 ```bash
-.venv/bin/python -m pytest -q tests                      # 离线：解析/归一化、判定流程、Overture 映射、各国数据源的响应解析、网页路由、上游客户端（1871 个）
+.venv/bin/python -m pytest -q tests                      # 离线：解析/归一化、判定流程、Overture 映射、各国数据源的响应解析、网页路由、上游客户端（1905 个）
 .venv/bin/python scripts/smoke_test.py http://127.0.0.1:8000   # 在线：60 个真实地址端到端（美国 21 个，含 Overture 兜底和国家识别；欧洲和日本 39 个）
 ```
 
