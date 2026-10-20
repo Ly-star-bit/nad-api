@@ -39,6 +39,15 @@
 .checks dt { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .checks dd { margin: 2px 0 0; font-size: 15px; font-weight: 600; white-space: nowrap; }
 
+.split-k { padding: 12px 28px 0; border-top: 1px solid var(--rule); }
+.split { display: grid; grid-template-columns: repeat(4, 1fr); margin: 0; border-bottom: 1px solid var(--rule); }
+.split > div { padding: 11px 16px 12px; border-left: 1px solid var(--rule-2); min-width: 0; }
+.split > div:nth-child(4n + 1), .split > .wide:nth-child(5) { border-left: 0; padding-left: 28px; }
+.split > .wide { grid-column: span 2; border-top: 1px solid var(--rule-2); }
+.split dt { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.split dd { margin: 2px 0 0; font-size: 15px; font-weight: 600; overflow-wrap: break-word; }
+.split dd.none { color: var(--muted); font-weight: 400; }
+
 .fields { margin: 0; border-bottom: 1px solid var(--rule); }
 .fields:last-child { border-bottom: 0; }
 .fields > div { display: grid; grid-template-columns: 7.5em 1fr; gap: 16px; padding: 10px 28px; border-bottom: 1px solid var(--rule-2); }
@@ -91,6 +100,11 @@
   .checks > div, .checks > div:first-child { padding: 10px 16px; }
   .checks > div:nth-child(3n + 1) { border-left: 0; }
   .checks > div:nth-child(n + 4) { border-top: 1px solid var(--rule-2); }
+  .split-k { padding: 10px 16px 0; }
+  .split { grid-template-columns: repeat(2, 1fr); }
+  .split > div, .split > div:nth-child(4n + 1), .split > .wide:nth-child(5) { padding: 10px 16px; border-left: 1px solid var(--rule-2); }
+  .split > div:nth-child(odd):not(.wide), .split > .wide { border-left: 0; }
+  .split > div:nth-child(n + 3) { border-top: 1px solid var(--rule-2); }
   .fields > div { grid-template-columns: 1fr; gap: 1px; padding: 10px 16px; }
   .fields dt { font-size: 12.5px; }
   .loading .foot { flex-direction: column; gap: 6px; }
@@ -253,6 +267,7 @@ function renderResult(r) {
       <p class="addr${bm ? '' : ' typed'}">${lines.map(esc).join('<br>')}</p>
       ${tools ? `<div class="maplinks">${tools}</div>` : ''}
     </section>`;
+  h += split(r);
   h += ambiguity(r);
   if (pt) h += `<section class="map-sec"><div id="map" class="map"></div>${mapKey(r)}</section>`;
 
@@ -375,6 +390,22 @@ function ambiguity(r) {
     </section>`;
 }
 
+// What the input was read as, in the order an order form has it: country, state, city, postcode, line 1, line 2.
+function split(r) {
+  const p = r.parsed || {};
+  if (!Object.keys(p).length) return '';
+  const jp = r.country === 'JP', cc = p.country || r.country || 'US';
+  const cell = (k, v, wide) => `<div${wide ? ' class="wide"' : ''}><dt>${k}</dt>${v ? `<dd>${esc(v)}</dd>` : '<dd class="none">—</dd>'}</div>`;
+  return `<div class="k split-k">输入拆分</div><dl class="split">${[
+    cell('国家', [countryNames[cc], cc].filter(Boolean).join(' ')),
+    cell(jp ? '都道府县' : '州', p.state),
+    cell(jp ? '市区町村' : '城市', p.city),
+    cell(zipWord(r), p.zip),
+    cell(jp ? '地址 1（町名 + 番地）' : '地址 1（门牌 + 街道）', p.address1, true),
+    cell(jp ? '地址 2（建筑 / 房间）' : '地址 2（单元）', p.address2, true),
+  ].join('')}</dl>`;
+}
+
 function checks(m, r) {
   const cell = (k, v) => `<div><dt>${k}</dt><dd>${v}</dd></div>`;
   const sc = m.street_score >= 0.95 ? 'y' : m.street_score >= 0.8 ? 'w' : 'n';
@@ -391,13 +422,8 @@ function checks(m, r) {
 function fields(r) {
   const rows = [];
   const add = (k, v) => { if (v) rows.push(`<div><dt>${k}</dt><dd>${v}</dd></div>`); };
-  const bm = r.best_match, p = r.parsed || {}, g = r.geocode, c = r.coverage, f = r.fallback;
-
-  const jp = r.country === 'JP', pv = r.provider;
+  const bm = r.best_match, g = r.geocode, c = r.coverage, f = r.fallback, pv = r.provider;
   if (bm) add('输入', esc(r.input));
-  add('解析结果', [['门牌', p.house_number], [jp ? '地名' : '街道', p.street], [jp ? '建筑/房间' : '单元', p.unit], ['城市', p.city],
-    ['州', p.state], [zipWord(r), p.zip]]
-    .filter(([, v]) => v).map(([k, v]) => `<span class="na">${k}</span> ${esc(v)}`).join(SEP));
   if (pv) {
     add('数据提供方', [esc(countryNames[r.country] || r.country), `<a href="${esc(pv.url)}" target="_blank" rel="noopener">${esc(pv.name)}</a>`,
       `许可 ${esc(pv.license)}`, pv.attribution && `<span class="na">${esc(pv.attribution)}</span>`].filter(Boolean).join(SEP));

@@ -220,3 +220,26 @@ def test_overture_miss_over_an_area_keeps_not_covered():
     up = NotInTiger([], in_nad=False)
     r = asyncio.run(verify_address(up, parse_oneline("120 CROSSGATE DR,PORT WENTWORTH,GA US"), overture=EmptyOverture()))
     assert r["status"] == "not_covered" and r["fallback"]["status"] == "not_found" and not r["fallback"]["adopted"]
+
+
+def _street_notes(text):
+    r = run(FakeUpstream(street=[nad(1700), nad(1702)]), text)
+    assert r["status"] == "verified"
+    return [n for n in r["notes"] if n.startswith("street written")]
+
+
+def test_standard_abbreviations_say_nothing_about_the_street():
+    assert _street_notes("1700 West Washington Street, Phoenix, AZ 85007") == []
+    assert _street_notes("1700 W Washington St, Phoenix, AZ 85007") == []
+
+
+def test_misspelled_street_names_the_record():
+    assert _street_notes("1700 W Washingtn St, Phoenix, AZ 85007") == [
+        "street written 'W Washingtn St', NAD record has 'West Washington Street'"]
+
+
+def test_left_out_direction_or_type_names_the_record():
+    assert _street_notes("1700 Washington St, Phoenix, AZ 85007") == [
+        "street written 'Washington St', NAD record has 'West Washington Street'"]
+    assert _street_notes("1700 W Washington, Phoenix, AZ 85007") == [
+        "street written 'W Washington', NAD record has 'West Washington Street'"]

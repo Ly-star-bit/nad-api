@@ -152,8 +152,10 @@ async def _europe(ctx: Ctx, a: IntlAddress, providers: tuple[str, ...], max_cand
     can't read ('Mustamae tee' for Mustamäe tee) - in which case its answer still stands unless the next does better.
     (`overture_fallback` is a US option: here Overture is a primary source, so only OVERTURE_ENABLED=0 drops it.)"""
     out = _base(a.country, a.raw)
-    out["parsed"] = {"house_number": a.number or None, "street": a.street or None, "unit": a.unit or None,
-                     "city": a.city or None, "state": None, "zip": a.postcode or None}
+    line = (a.number, a.street) if COUNTRIES[a.country].number_first else (a.street, a.number)
+    out["parsed"] = {"country": a.country, "state": None, "city": a.city or None, "zip": a.postcode or None,
+                     "address1": " ".join(p for p in line if p) or None, "address2": a.unit or None,
+                     "house_number": a.number or None, "street": a.street or None, "unit": a.unit or None}
     out["notes"] += a.warnings
     if a.extra:
         out["notes"].append(f"not used for matching: {'; '.join(a.extra)}")
@@ -274,9 +276,10 @@ async def _japan(ctx: Ctx, jpost: japan.JapanPost | None, text: str, **hints: st
         out["notes"].append(f"国土地理院 gave an answer that could not be read ({type(exc).__name__})")
         return out
     a: japan.JpAddress = r["jp"]
-    out["parsed"] = {"house_number": a.number or None, "street": a.prefix or None, "unit": a.rest or None,
-                     "city": "、".join(a.hints) or None, "state": "、".join(a.prefer) or None,
-                     "zip": a.postcode or None}
+    pref, city, town = japan.split_place(jpost, a)
+    out["parsed"] = {"country": "JP", "state": pref or None, "city": city or None, "zip": a.postcode or None,
+                     "address1": town + a.number or None, "address2": a.rest or None,
+                     "house_number": a.number or None, "street": a.prefix or None, "unit": a.rest or None}
     out["notes"] += r["notes"]
     out["timing_ms"].update(r["timing"])
     out["geocode"] = r["geocode"]

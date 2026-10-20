@@ -723,7 +723,7 @@ function guideHtml() {
     ${row('从 Excel 复制', '直接粘贴多列。第一行是表头时按列名识别，没有表头就把各列按顺序拼成一行地址')}
     ${row('上传 CSV', '表头用 <code>address</code>，或者 <code>street</code> / <code>unit</code> / <code>city</code> / <code>state</code> / <code>zip</code>，也认“地址、街道、城市、州、邮编”，以及订单导出里带前缀的列名，如 Shipping Address 1、Ship City、收件人地址。UTF-8 和 GBK 编码都可以')}
     ${row('其他国家', '有 <code>country</code>（或“国家”）列时按它判断，填 ISO 代码（DE、JP）或国名（Germany、德国）都可以；没有国家列时，地址末尾写了国家名（…, Berlin, Germany）或者是日文地址的会自动识别，其余按上方的默认国家，默认是美国')}
-    ${row('导出', '原表的列原样保留，后面追加 <code>verify_status</code>、<code>verify_verdict</code>、<code>verify_matched_address</code>、<code>verify_nearest_number</code>（门牌不存在时同街最近的门牌）、<code>verify_zip_should_be</code>（ZIP 填错时记录里的 ZIP）等结果列')}
+    ${row('导出', '原表的列原样保留，后面先追加拆分出的 <code>parsed_country</code>、<code>parsed_state</code>、<code>parsed_city</code>、<code>parsed_zip</code>、<code>parsed_address1</code>（门牌 + 街道）、<code>parsed_address2</code>（单元），再追加 <code>verify_status</code>、<code>verify_verdict</code>、<code>verify_matched_address</code>、<code>verify_nearest_number</code>（门牌不存在时同街最近的门牌）、<code>verify_zip_should_be</code>（ZIP 填错时记录里的 ZIP）等结果列')}
   </table></section>`;
 }
 
@@ -739,7 +739,9 @@ setInterval(() => {
 
 // ------------------------------------------------------------------ export
 
-const RESULT_COLS = ['verify_status', 'verify_verdict', 'verify_confidence', 'verify_country', 'verify_data_source', 'verify_matched_address',
+// what each row was read as (address1 = number + street, address2 = unit), then the verdict
+const PARSED_COLS = ['country', 'state', 'city', 'zip', 'address1', 'address2'];
+const RESULT_COLS = [...PARSED_COLS.map((k) => `parsed_${k}`), 'verify_status', 'verify_verdict', 'verify_confidence', 'verify_country', 'verify_data_source', 'verify_matched_address',
   'verify_lat', 'verify_lon', 'verify_record_source', 'verify_nearest_number', 'verify_census_matches', 'verify_zip_should_be',
   'verify_notes', 'verify_license', 'verify_attribution'];
 
@@ -760,9 +762,10 @@ function csvCell(v) {
 function resultCells(r) {
   if (r.state !== 'done') return RESULT_COLS.map(() => '');
   const x = r.result;
-  if (!x) return ['error', '出错', '', '', '', '', '', '', '', '', '', '', r.error || '', '', ''];
-  const bm = x.best_match || {}, near = !x.best_match && (x.suggestions || [])[0], g = x.geocode || {};
-  return [x.status, verdictLabel(x), x.data_source ? x.confidence : '', x.country || 'US', x.data_source || '', bm.formatted || '',
+  if (!x) return [...PARSED_COLS.map(() => ''), 'error', '出错', '', '', '', '', '', '', '', '', '', '', r.error || '', '', ''];
+  const bm = x.best_match || {}, near = !x.best_match && (x.suggestions || [])[0], g = x.geocode || {}, p = x.parsed || {};
+  return [...PARSED_COLS.map((k) => (k === 'zip' ? excelText(p.zip || '') : p[k] || '')),
+    x.status, verdictLabel(x), x.data_source ? x.confidence : '', x.country || 'US', x.data_source || '', bm.formatted || '',
     bm.lat ?? '', bm.lon ?? '', bm.source || '', near ? near.formatted : '', g.match_count > 1 ? g.match_count : '',
     excelText(zipMismatch(x) || ''), (x.notes || []).join('; '),
     // the record's own licence (an Overture row carries its source dataset's) before the provider's general one

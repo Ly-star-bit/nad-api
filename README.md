@@ -41,6 +41,9 @@ Census 定位失败（新建街道常见，TIGER 里还没有）：
   1500 m 搜索只会找到别的街上的同号门牌，直接跳过。曼哈顿这类密集区 1500 m 搜索要 5–18 s。
 - **街道比对**：编号街道必须号码一致（`5th Ave` 和 `3rd Ave` 按字符相似度是 0.8，曾被判成同一条街）；
   同名不同类型（`NW 5th St` / `NW 5th Ave`，网格城市里是两条交叉的街）不算匹配。
+  核实通过但街道写法和记录不同（拼错、漏了方向或类型：`W Washingtn St`、`Washington St`、`W Washington`）时，
+  `notes` 写出记录里的街名：`street written 'W Washingtn St', NAD record has 'West Washington Street'`；
+  标准简写（`Street` / `St`、`West` / `W`、`Fifth` / `5th`）归一化后相同，不提示。
 - **Overture 只做能改变结论的查询**：NAD 已经是 `street_only` 时，Overture 只查门牌，不再做街道探测
   （探测最多得到同样的 `street_only`，而同级结论不会替换 NAD 的结果）。
 - **同一时刻的相同上游请求合并成一次**（批量里重复的地址、相邻地址的同一个县），结果照常进缓存。
@@ -245,7 +248,8 @@ docker build -t nad-api . && docker run -p 8000:8000 nad-api
   页面按每批 20 条调用 `/v1/verify/batch?stream=true`，每条查完立刻显示（不用等同批最慢的那条），可停止、继续、
   重试失败行（服务明确拒绝的行，比如不支持的国家，不再重试）；地图按结论着色显示每一行（没有匹配记录时用定位点，
   官方登记没有定位点时用同街最近的门牌并注明），跟随筛选，点圆点看详情。
-  导出 CSV 时原表的列原样保留，后面追加 `verify_status`、`verify_verdict`、`verify_confidence`、`verify_matched_address`、
+  导出 CSV 时原表的列原样保留，后面先追加每行拆分出的 `parsed_country`、`parsed_state`、`parsed_city`、`parsed_zip`、
+  `parsed_address1`（门牌 + 街道）、`parsed_address2`（单元），再追加 `verify_status`、`verify_verdict`、`verify_confidence`、`verify_matched_address`、
   `verify_country`、`verify_nearest_number`（门牌不存在时同街最近的门牌）、`verify_census_matches`（Census 匹配到多个地址时的个数）、`verify_zip_should_be`（填的 ZIP 和记录不一致时，
   记录里的 ZIP；地址存在但 ZIP 填错会让包裹分错，结果行里也会标出来）、`verify_license` / `verify_attribution`
   （数据许可和需要标注的来源）等结果列。
@@ -288,6 +292,11 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
   "data_source": "nad",          // nad | overture | null —— 最终结论来自哪个数据集；美国以外是数据源代码（fr_ban、jp_gsi、osm …）
   "country": "US",               // 美国以外另带 "provider": {"name", "authority", "license", "attribution"}
   "nad_status": "verified",      // 仅 NAD 的结论（兜底前）
+  "parsed": {                    // 输入拆成的字段：地址 1 = 门牌 + 街道，地址 2 = 单元；日本 state / city 是都道府県 / 市区町村，
+    "country": "US", "state": "CA", "city": "Sacramento", "zip": "95814",     // 地址 1 是町名 + 番地，地址 2 是建筑 / 房间
+    "address1": "980 9th St", "address2": "Ste 1750",
+    "house_number": "980", "street": "9th St", "unit": "Ste 1750"
+  },
   "fallback": null,              // 触发兜底时：{"provider":"overture","release":"2026-09-23.1","triggered_by":"not_covered","status":"verified","adopted":true}
   "best_match": {                // NAD 官方记录（或 Overture 记录，结构相同，另带 license）
     "uuid": "0a94ab67-b07b-46de-9d67-0717f9b42e59", "formatted": "980 9TH Street, STE 1750, SACRAMENTO, CA 95814",
@@ -378,7 +387,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 ## 测试
 
 ```bash
-.venv/bin/python -m pytest -q tests                      # 离线：解析/归一化、判定流程、Overture 映射、各国数据源的响应解析、网页路由、上游客户端（1831 个）
+.venv/bin/python -m pytest -q tests                      # 离线：解析/归一化、判定流程、Overture 映射、各国数据源的响应解析、网页路由、上游客户端（1871 个）
 .venv/bin/python scripts/smoke_test.py http://127.0.0.1:8000   # 在线：60 个真实地址端到端（美国 21 个，含 Overture 兜底和国家识别；欧洲和日本 39 个）
 ```
 

@@ -397,6 +397,7 @@ class JapanPost:
         self.by_town: dict[str, list[PostRow]] = {}    # town_key(town)
         self.by_romaji: dict[str, list[PostRow]] = {}  # town_r
         self._cities: tuple[dict, dict[str, set[tuple[str, str]]]] = ({}, {})  # (its by_pc, romaji_city's index)
+        self._muni: tuple[dict, dict[str, list[str]]] = ({}, {})  # (its by_pc, prefecture -> cities, longest first)
         self.loaded_at = 0.0
         self.error: str | None = None
         self._lock = asyncio.Lock()
@@ -545,6 +546,26 @@ class JapanPost:
             self._cities = (self.by_pc, index)
         cities = {pref + c for pref, c in self._cities[1].get(name, ()) if c.endswith(kinds[-1])}
         return cities.pop() if len(cities) == 1 else ""
+
+    def city_at(self, pref: str, text: str) -> str:
+        """The city (市区町村) `text` starts with, as written there: '大阪市中央区本町' -> '大阪市中央区'. A ward city
+        written without its ward ('大阪市本町') and a town without its 郡 ('軽井沢町') count. '' when none fits;
+        without the prefecture, only a city name no other prefecture has."""
+        if self._muni[0] is not self.by_pc:
+            index: dict[str, set[str]] = {}
+            for rows in self.by_pc.values():
+                for r in rows:
+                    names = index.setdefault(r.pref, set())
+                    names.add(r.city)
+                    if m := re.match(r"(.+?市).+区$", r.city):  # 大阪市中央区 -> 大阪市
+                        names.add(m.group(1))
+                    if "郡" in r.city[:-1]:  # 北佐久郡軽井沢町 -> 軽井沢町
+                        names.add(r.city.split("郡", 1)[1])
+            self._muni = (self.by_pc, {p: sorted(n, key=len, reverse=True) for p, n in index.items()})
+        prefs = [pref] if pref else list(self._muni[1])
+        found = {c for p in prefs for c in self._muni[1].get(p, ()) if text.startswith(c) and len(text) > len(c)}
+        best = max(found, key=len, default="")
+        return best if pref or sum(best in self._muni[1].get(p, ()) for p in prefs) == 1 else ""
 
     def romaji_places(self, text: str, near: tuple[int | None, int, int] = (None, 0, 0),
                       postcode: set[str] = frozenset(), skip: range = range(0)) -> list[PostRow]:
@@ -848,6 +869,22 @@ def _retries(a: JpAddress, titles: list[Title], jp: JapanPost | None):
                     tried.add(places[0])
                     yield places[0]
                 break
+
+
+def split_place(jp: JapanPost | None, a: JpAddress) -> tuple[str, str, str]:
+    """-> (prefecture, city, the town after them) of the place read before the numbers. The prefecture or city can
+    also be written apart ('本町1-1-1, 中央区, 大阪府', a state / city field); a part not written (or, for a city in
+    the line, not in Japan Post's table) is ''."""
+    pref, city, place = "", "", a.prefix
+    if m := _PREF_RE.match(place):
+        pref, place = m.group(), place[m.end():]
+    if jp is not None and jp.ready and (city := jp.city_at(pref, place)):
+        place = place[len(city):]
+    for h in a.hints + a.prefer:  # '東京都新宿区' from a romaji city field, '大阪府', '中央区'
+        m = _PREF_RE.match(h)
+        pref = pref or (m.group() if m else "")
+        city = city or (h[m.end():] if m else h)
+    return pref, city, place
 
 
 def _fill_place(jp: JapanPost, a: JpAddress) -> list[str]:

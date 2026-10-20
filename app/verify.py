@@ -192,6 +192,15 @@ class Decision:
     notes: list[str] = field(default_factory=list)
 
 
+def _street_note(pa: ParsedAddress, best: dict, dataset: str) -> list[str]:
+    """Name the record's street when it is written differently from the input: a typo, a left-out direction or type.
+    Standard abbreviations (Street / St, West / W, Fifth / 5th) normalize to the same key and say nothing."""
+    user, have = StreetKey.from_text(pa.street_text), record_street_key(best)
+    if not user.full or not have.full or user.full.replace(" ", "") == have.full.replace(" ", ""):
+        return []
+    return [f"street written '{pa.street_text}', {dataset} record has '{best.get('street') or have.full}'"]
+
+
 def decide(pa: ParsedAddress, scored: list[dict], suggestions: list[dict], *, dataset: str, ref_zip: str,
            max_candidates: int, coverage: dict | None = None, area_empty: bool = False,
            empty_note: str | None = None, notes: list[str] | None = None) -> Decision:
@@ -205,11 +214,13 @@ def decide(pa: ParsedAddress, scored: list[dict], suggestions: list[dict], *, da
             with_unit = [c for c in exact if c["match"]["unit_match"]]
             if with_unit:
                 best = with_unit[0]
+                d.notes += _street_note(pa, best, dataset)
                 d.status, d.verified, d.match_level, d.best_match = "verified", True, "unit", best
                 d.confidence = best["match"]["score"]
                 return d
             best = next((c for c in exact if not _unit_values(c)), exact[0])  # the building, not a random unit
             units = sorted({u for c in exact for u in _unit_values(c)}, key=_natural)
+            d.notes += _street_note(pa, best, dataset)
             d.notes.append(
                 f"building address exists in {dataset} but unit '{pa.unit_raw}' is not recorded"
                 + (f"; {dataset} units at this address: {', '.join(units[:20])}" if units else
@@ -224,6 +235,7 @@ def decide(pa: ParsedAddress, scored: list[dict], suggestions: list[dict], *, da
         n_units = sum(1 for c in exact if _unit_values(c))
         if n_units:
             d.notes.append(f"{n_units} sub-address (unit) records share this address number in the search window")
+        d.notes += _street_note(pa, best, dataset)
         if best["match"]["zip_match"] is False:
             d.notes.append(f"ZIP differs: input/geocoder {ref_zip} vs {dataset} {best['zip']}")
         if not best["match"]["number_exact"]:
@@ -400,12 +412,15 @@ async def verify_address(
         "nad_status": None,
         "input": pa.raw,
         "parsed": {
+            "country": "US",
+            "state": pa.state or None,
+            "city": pa.city or None,
+            "zip": pa.zip5 or None,
+            "address1": " ".join(p for p in (pa.house.raw if pa.house else "", pa.street_text) if p) or None,
+            "address2": pa.unit_raw or None,
             "house_number": pa.house.raw if pa.house else None,
             "street": pa.street_text or None,
             "unit": pa.unit_raw or None,
-            "city": pa.city or None,
-            "state": pa.state or None,
-            "zip": pa.zip5 or None,
         },
         "geocode": None,
         "coverage": None,
