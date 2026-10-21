@@ -7,11 +7,12 @@ from fastapi import HTTPException
 from app.intl import countries as C
 from app.main import _country
 from app.models import VerifyRequest
+from batch_line import as_request
 
 
 def route(**req) -> str:
     try:
-        return _country(VerifyRequest(**req))
+        return _country(VerifyRequest(**as_request(req)))
     except HTTPException as e:
         assert e.status_code == 422
         return "422"
@@ -62,11 +63,6 @@ def test_r3_2_erp_state_cells_with_a_us_zip_stay_us(street, city, state, zip_):
     assert route(street=street, city=city, state=state, zip=zip_) == "US"
 
 
-def test_r3_2_state_cell_labels():
-    assert [C.state_cell(v) for v in ("Delaware (DE)", "M.D.", "Ala.", "ＭＥ", "Germany (DE)", "ALA", "France")] == [
-        "DE", "MD", "AL", "ME", "", "", ""]
-
-
 # [3] / [48] / [64]: the country written out at the end beats a province + CAP that looks like a state + ZIP
 @pytest.mark.parametrize("text, code", [
     ("Via Roma 10, Milano, MI 20121, Italy", "IT"), ("Via Roma 10, Milano MI 20121, Italy", "IT"),
@@ -82,59 +78,6 @@ def test_r3_2_state_cell_labels():
 ])
 def test_r3_3_country_written_out_after_a_province(text, code):
     assert route(**line(text)) == code
-
-
-def test_r3_64_a_default_never_beats_usa():
-    assert route(**line("100 Main St, Holland, MI 40000, USA", default_country="IT")) == "US"
-    assert route(**line("Via Roma 10, Milano MI 20121, USA", default_country="IT")) == "US"
-
-
-# [4] / [9] / [49] / [57] / [58] / [67]: a batch default and a trailing code that is also a US state
-@pytest.mark.parametrize("req, code", [
-    (line("Via Roma 10, Milano, MI, 20121"), "IT"), (line("Via Garibaldi 1, 98122 Messina ME"), "IT"),
-    (line("Via Roma 10, Milano MI"), "IT"), (line("Via Roma 10, Milano, MI"), "IT"),
-    (line("Via Roma 10, Trento, TN 38122"), "IT"), (line("Corso Palladio 1, Vicenza VI 36100"), "IT"),
-    (line("Piazza del Popolo 1, Ascoli Piceno AP 63100"), "IT"), (line("Via Roma 10 20121 Milano MI"), "IT"),
-    (line("Via Roma 1 22100 Como CO"), "IT"), (line("Via Maqueda 100 90133 Palermo PA"), "IT"),
-    (line("Piazza della Signoria 5, 50122, Firenze, FI"), "IT"), (line("Via del Corso 10, 00186, Roma, RM"), "IT"),
-    (line("Via Roma 1, 03100 Frosinone FR"), "IT"),
-    ({"street": "Via Roma 10", "city": "Trento", "state": "TN", "zip": "38122"}, "IT"),
-    ({"street": "Corso Palladio 1", "city": "Vicenza", "state": "VI", "zip": "36100"}, "IT"),
-    # stays American: a US street, a PO box, a base, or a ZIP of that state with no European street
-    (line("1 Woodward Ave, Detroit, MI 48226"), "US"), (line("Memphis, TN 38122"), "US"),
-    ({"street": "PO Box 5", "city": "Memphis", "state": "TN", "zip": "38122"}, "US"),
-    ({"street": "1000 Poplar Ave", "city": "Memphis", "state": "TN", "zip": "38122"}, "US"),
-    (line("Unit 5, PSC 1234, APO AP 96204"), "US"), (line("100 Main St, Holland, MI 40000"), "US"),
-    (line("Bahnhofstrasse 1, 8001 Zürich CH"), "CH"),  # CH is also Chieti, but 8001 is no Italian CAP
-])
-def test_r3_4_italian_batch(req, code):
-    assert route(**req, default_country="IT") == code
-
-
-@pytest.mark.parametrize("req, default, code", [
-    ({"street": "Damrak 1", "city": "Amsterdam", "state": "NH", "zip": "1012 LG"}, "NL", "NL"),
-    ({"street": "Oudegracht 1", "city": "Utrecht", "state": "UT", "zip": "3511 AA"}, "NL", "NL"),
-    ({"street": "Stadhuisplein 1", "city": "Almere", "state": "FL", "zip": "1315 KA"}, "NL", "NL"),
-    ({"street": "Rue du Seyon 1", "city": "Neuchâtel", "state": "NE", "zip": "2000"}, "CH", "CH"),
-    ({"street": "Calle Larios 1", "city": "Málaga", "state": "MA", "zip": "29005"}, "ES", "ES"),
-    ({"street": "Calle Gondomar 1", "city": "Córdoba", "state": "CO", "zip": "14001"}, "ES", "ES"),
-    ({"street": "Unter den Linden 77", "city": "Berlin", "state": "DE"}, "DE", "DE"),
-    (line("Calle Larios 1, Málaga MA 29005"), "ES", "ES"), (line("Unter den Linden 77, Berlin, DE"), "DE", "DE"),
-    (line("Republic Street 1, Valletta, MT"), "MT", "MT"), (line("Rue du Seyon 1, Neuchâtel NE"), "CH", "CH"),
-    (line("Hauptstraße 5 10115 Berlin DE"), "DE", "DE"), (line("Unter den Linden 77 10117 Berlin, DE"), "DE", "DE"),
-    (line("Unter den Linden 77, Berlin, DE 10117"), "DE", "DE"),
-    (line("Triq ir-Repubblika 1 Valletta VLT 1117 MT"), "MT", "MT"), (line("Rruga e Durresit 10, Tirane, AL"), "AL", "AL"),
-    (line("Bulevardi Svetog Petra Cetinjskog 1, Podgorica, ME"), "ME", "ME"),
-    (line("Bd. Stefan cel Mare 1, Chisinau, MD"), "MD", "MD"), (line("Bundesplatz 3, 3011, Bern, BE"), "CH", "CH"),
-    (line("Bundesplatz 3, 3011 Bern BE"), "CH", "CH"),
-    # a US line in a German batch stays American
-    (line("123 Main St, Wilmington, DE"), "DE", "US"), (line("1000 N West St, Wilmington, DE 19801"), "DE", "US"),
-    ({"street": "100 Main St", "city": "Wilmington", "state": "DE", "zip": "19801"}, "DE", "US"),
-    ({"street": "Damrak 1", "city": "Amsterdam", "state": "NH", "zip": "03101"}, "NL", "US"),
-    (line("Via Roma 1, Cagliari CA 09123"), "DE", "US"),
-])
-def test_r3_9_batch_default_and_its_own_codes(req, default, code):
-    assert route(**req, default_country=default) == code
 
 
 # [5] / [42]: Chinese and Taiwanese lines are not Japanese; Japanese lines with a room or name after them are
@@ -187,12 +130,6 @@ def test_r3_6_code_after_postcode_and_town(text, code):
     assert route(**line(text)) == code
 
 
-def test_r3_56_the_default_keeps_its_province_codes():
-    assert route(**line("Via dei Calzaiuoli 7, 50122 Firenze FI", default_country="IT")) == "IT"
-    assert route(**line("Kapellplatz 1, 6004 Luzern LU", default_country="CH")) == "CH"
-    assert route(**line("10 Rue de Rivoli, 75001 Paris FR", default_country="DE")) == "FR"
-
-
 # [7] / [60]: 'Street Town, Country' in two parts; the US-town rule needs a US street line before the name
 @pytest.mark.parametrize("text, code", [
     ("10 Rue de Rivoli Paris, France", "FR"), ("Damrak 1 Amsterdam, Holland", "NL"), ("Ermou 10 Athens, Greece", "GR"),
@@ -208,32 +145,11 @@ def test_r3_7_street_town_country(text, code):
     assert route(**line(text)) == code
 
 
-# [8]: the country in the state cell or after the city, with a 5-digit postcode
-@pytest.mark.parametrize("req, code", [
-    ({"street": "10 Rue de Rivoli", "city": "Paris", "state": "France", "zip": "75001"}, "FR"),
-    ({"street": "Via Roma 10", "city": "Milano", "state": "Italy", "zip": "20121"}, "IT"),
-    ({"street": "Mannerheimintie 1", "city": "Helsinki", "state": "Finland", "zip": "00100"}, "FI"),
-    ({"street": "Drottninggatan 1", "city": "Stockholm", "state": "Sweden", "zip": "11151"}, "SE"),
-    ({"street": "Ermou 10", "city": "Athens", "state": "Greece", "zip": "10563"}, "GR"),
-    ({"street": "10 Rue de Rivoli", "city": "Paris, France", "zip": "75001"}, "FR"),
-    ({"street": "Via Roma 10", "city": "Milano, Italy", "zip": "20121"}, "IT"),
-    ({"street": "Via Roma 10", "city": "20121 Milano MI, Italy"}, "IT"),
-])
-def test_r3_8_country_in_a_structured_cell(req, code):
-    assert route(**req) == code
-
-
 # [10] / [50]: a US town named like a country, then its ZIP
 @pytest.mark.parametrize("text", ["1 Main St, Greece, 14612", "1 Main St, Italy, 76651", "1 Main St, Sweden, 04040",
                                   "1 Main St, Finland, 55603", "1 Main St, Greece, 14616"])
 def test_r3_10_us_town_named_like_a_country_then_zip(text):
     assert route(**line(text)) == "US"
-
-
-# [59]: an unsupported default only matters when it is used
-def test_r3_59_unsupported_default_only_when_used():
-    assert route(**line("Unter den Linden 77, 10117 Berlin, Germany", default_country="CN")) == "DE"
-    assert route(**line("Unter den Linden 77, Berlin", default_country="CN")) == "422"
 
 
 # S03: a Chinese country name first, before a line that ends in a province code

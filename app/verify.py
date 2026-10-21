@@ -201,6 +201,21 @@ def _street_note(pa: ParsedAddress, best: dict, dataset: str) -> list[str]:
     return [f"street written '{pa.street_text}', {dataset} record has '{best.get('street') or have.full}'"]
 
 
+def record_split(rec: dict, level: str | None, parsed: dict) -> dict:
+    """A verified address split as the record has it ('Phoen' -> Phoenix, 'W Washington St' -> West Washington
+    Street). The unit is the record's when it was matched too; else the one written, which the record can't speak to.
+    A part the record lacks stays as written. `source: record` tells it from the input's own split."""
+    sub = rec.get("subaddress") or {}
+    unit = (" ".join(v for v in (sub.get("building"), sub.get("floor"), sub.get("unit"), sub.get("room")) if v)
+            or sub.get("subaddress")) if level == "unit" else None
+    unit = unit or parsed.get("address2")
+    number, street = rec.get("address_number"), rec.get("street")
+    return {**parsed, "city": rec.get("city") or parsed.get("city"), "zip": rec.get("zip") or parsed.get("zip"),
+            "address1": " ".join(p for p in (number, street) if p) if street else parsed.get("address1"), "address2": unit,
+            "house_number": number or parsed.get("house_number"), "street": street or parsed.get("street"),
+            "unit": unit, "source": "record"}
+
+
 def decide(pa: ParsedAddress, scored: list[dict], suggestions: list[dict], *, dataset: str, ref_zip: str,
            max_candidates: int, coverage: dict | None = None, area_empty: bool = False,
            empty_note: str | None = None, notes: list[str] | None = None) -> Decision:
@@ -393,11 +408,6 @@ async def verify_address(
     pa: ParsedAddress,
     *,
     overture: "OvertureClient | None" = None,
-    lat: float | None = None,
-    lon: float | None = None,
-    structured: bool = False,
-    zip_fallback: bool = False,
-    overture_fallback: bool = True,
     max_candidates: int = 5,
 ) -> dict[str, Any]:
     t0 = time.perf_counter()
@@ -451,30 +461,22 @@ async def verify_address(
     # ---- 1. geocode -------------------------------------------------------------------
     geocode: dict | None = None
     geocode_error: str | None = None
-    if lat is not None and lon is not None:
-        geocode = {"source": "input", "lat": lat, "lon": lon}
-    else:
-        t = time.perf_counter()
-        try:
-            # Census' structured form refuses a city without state or ZIP; the one-line form takes it
-            if structured and (pa.state or pa.zip5):
-                street_line = " ".join(p for p in (pa.house.raw, pa.street_text) if p)
-                geocode = await up.census_geocode_structured(street_line, pa.city, pa.state, pa.zip5)
-            else:
-                geocode = await up.census_geocode_oneline(pa.geocode_text)
-        except UpstreamRejected as exc:
-            notes.append(f"census geocoder rejected the address: {exc.message}")
-        except UpstreamError as exc:
-            geocode_error = exc.message
-            notes.append(f"census geocoder unavailable: {exc.message}")
-        timings["geocode"] = round((time.perf_counter() - t) * 1000, 1)
-        if geocode:
-            geocode = {"source": "census", **geocode}
-            if geocode.get("alternatives"):
-                others = "; ".join(a["matched_address"] for a in geocode["alternatives"][:4])
-                notes.append(f"Census found {geocode['match_count']} addresses for this input and only the first "
-                             f"({geocode['matched_address']}) was checked; add the state or ZIP to pick one. "
-                             f"Others: {others}")
+    t = time.perf_counter()
+    try:
+        geocode = await up.census_geocode_oneline(pa.geocode_text)
+    except UpstreamRejected as exc:
+        notes.append(f"census geocoder rejected the address: {exc.message}")
+    except UpstreamError as exc:
+        geocode_error = exc.message
+        notes.append(f"census geocoder unavailable: {exc.message}")
+    timings["geocode"] = round((time.perf_counter() - t) * 1000, 1)
+    if geocode:
+        geocode = {"source": "census", **geocode}
+        if geocode.get("alternatives"):
+            others = "; ".join(a["matched_address"] for a in geocode["alternatives"][:4])
+            notes.append(f"Census found {geocode['match_count']} addresses for this input and only the first "
+                         f"({geocode['matched_address']}) was checked; add the state or ZIP to pick one. "
+                         f"Others: {others}")
 
     census_key, user_key = census_street_key(geocode), StreetKey.from_text(pa.street_text)
     keys = [k for k in (census_key, user_key) if k]
@@ -495,26 +497,6 @@ async def verify_address(
         out["geocode"] = geocode
         origin = (geocode["lat"], geocode["lon"])
         nad_dec = await _nad_near_phase(up, pa, geocode, keys, ref_zip, out, timings, max_candidates)
-    elif zip_fallback and pa.zip5:
-        # Optional ZIP fallback when the address is not in TIGER.
-        t = time.perf_counter()
-        try:
-            extent = await up.zcta_extent(pa.zip5)
-        except UpstreamError as exc:
-            notes.append(f"ZIP lookup failed: {exc.message}")
-            return finish("upstream_error")
-        if not extent:
-            notes.append(f"ZIP {pa.zip5} not found in Census ZCTAs")
-            return finish("geocode_failed")
-        out["geocode"] = {"source": "zcta", "zip": pa.zip5, "extent": extent}
-        try:
-            recs = await up.nad_in_envelope(extent, f"Add_Number = {pa.house.number} AND Zip_Code = '{pa.zip5}'")
-            scored = _rank([score_candidate(r, pa, keys, None, ref_zip) for r in recs])
-            nad_dec = decide(pa, scored, [], dataset="NAD", ref_zip=ref_zip, max_candidates=max_candidates,
-                             empty_note="no matching NAD record in the ZIP area")
-        except UpstreamError as exc:
-            nad_dec = Decision(status="upstream_error", notes=[f"NAD ZIP search failed: {exc.message}"])
-        timings["nad"] = round((time.perf_counter() - t) * 1000, 1)
     elif (pa.zip5 or (pa.city and pa.state)) and not geocode_error and _name_token(user_key):
         # Search the ZIP area (or the ZIP areas overlapping the named city) for this number on a street with this
         # name: new streets are often missing from TIGER but already in NAD (28869 Fanning Dr NW, Madison, AL).
@@ -579,19 +561,16 @@ async def verify_address(
         # time out / read 27 GB).
         if geocode_error:  # the geocoder was unreachable: nothing is known about the address itself
             return finish("upstream_error")
-        if not pa.zip5:
-            notes.append("address could not be geocoded; add a ZIP code and set zip_fallback=true to search the ZIP area")
-        else:
-            notes.append("address could not be geocoded; retry with zip_fallback=true to search the whole ZIP area (slower)")
+        notes.append("address could not be geocoded" + ("" if pa.zip5 else "; add a ZIP code to search the ZIP area"))
         return finish("geocode_failed")
 
     apply(nad_dec, "nad")
     out["nad_status"] = nad_dec.status
 
     # ---- 3. Overture fallback -----------------------------------------------------------
-    if overture is not None and overture_fallback and nad_dec.status in FALLBACK_TRIGGERS and not overture_area:
+    if overture is not None and nad_dec.status in FALLBACK_TRIGGERS and not overture_area:
         notes.append("the search area is too large for the Overture fallback" + ("" if pa.zip5 else "; add a ZIP code"))
-    elif overture is not None and overture_fallback and nad_dec.status in FALLBACK_TRIGGERS:
+    elif overture is not None and nad_dec.status in FALLBACK_TRIGGERS:
         info: dict[str, Any] = {"provider": "overture", "release": None, "triggered_by": nad_dec.status,
                                 "status": None, "adopted": False, "error": None}
         out["fallback"] = info
@@ -620,4 +599,7 @@ async def verify_address(
 
     if street_unknown and out["status"] == "not_found":
         out.update(status="geocode_failed", confidence=0.0)
+    if out["verified"]:
+        out["parsed"] = record_split(out["best_match"], out["match_level"], out["parsed"])
+        out["parsed"]["state"] = out["best_match"].get("state") or out["parsed"]["state"]
     return finish()

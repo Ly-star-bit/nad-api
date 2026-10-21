@@ -628,25 +628,3 @@ def _no_number_warning(street_line: str) -> str:
     if _PO_BOX_RE.match(clean(street_line)):
         return "PO Box is a USPS mailbox, not a street address; NAD and Overture only hold physical address points"
     return "no house number found in input"
-
-
-def parse_structured(street: str, city: str = "", state: str = "", zip_code: str = "",
-                     unit: str = "") -> ParsedAddress:
-    street, city, state, zip_code, unit = (prep(v) for v in (street, city, state, zip_code, unit))
-    street_line, unit_id, unit_raw = extract_unit(street)
-    if unit:
-        unit_id, unit_raw = norm_unit(unit), unit
-    pa = ParsedAddress(
-        raw=", ".join(p for p in (street, unit, city, f"{state} {zip_code}".strip()) if p),
-        unit=unit_id, unit_raw=unit_raw, city=city, state=state_abbr(state) or state.upper(),
-    )
-    pa.zip5, pa.zip4, warning = fix_zip(zip_code, pa.state)
-    if warning:
-        pa.warnings.append(warning)
-    elif zip_code and not pa.zip5:
-        pa.warnings.append(f"unrecognized ZIP code '{zip_code}'")
-    pa.house, pa.street_text = parse_house_number(street_line)
-    if pa.house is None:
-        pa.warnings.append(_no_number_warning(street_line))
-    pa.geocode_text = ", ".join(p for p in (street_line, pa.city, f"{pa.state} {pa.zip5}".strip()) if p)
-    return pa

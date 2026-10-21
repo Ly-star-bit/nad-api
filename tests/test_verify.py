@@ -194,15 +194,11 @@ def test_name_token_survives_normalization():
     assert _name_token(StreetKey.from_text("O'Neal Rd")) == "NEAL"  # LIKE '%NEAL%' still finds O'Neal
 
 
-def test_zip_without_zip_fallback_searches_the_street_in_that_zip():
+def test_zip_area_is_searched_for_the_street_when_census_misses():
     up = NotInTiger([FANNING])
     r = run(up, "28869 Fanning Dr NW, Madison, AL 35756")
     assert r["status"] == "verified" and r["geocode"] == {"source": "zcta", "zip": "35756", "extent": r["geocode"]["extent"]}
     assert up.wheres == ["Add_Number = 28869 AND St_Name LIKE '%FANNING%'"]
-    # zip_fallback=true keeps searching every street in the ZIP
-    up = NotInTiger([FANNING])
-    asyncio.run(verify_address(up, parse_oneline("28869 Fanning Dr NW, Madison, AL 35756"), overture=None, zip_fallback=True))
-    assert up.wheres == ["Add_Number = 28869 AND Zip_Code = '35756'"]
 
 
 class EmptyOverture:

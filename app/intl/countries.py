@@ -260,16 +260,6 @@ _ZIP3 = {"AL": ((350, 369),), "AR": ((716, 729),), "CA": ((900, 961),), "CO": ((
          "MS": ((386, 397),), "MT": ((590, 599),), "NE": ((680, 693),), "NH": ((30, 38),), "OR": ((970, 979),),
          "PA": ((150, 196),), "PR": ((6, 7), (9, 9)), "RI": ((28, 29),), "TN": ((370, 385),), "UT": ((840, 847),),
          "VA": ((201, 201), (220, 246)), "VI": ((8, 8),), "VT": ((50, 59),), "AP": ((962, 966),)}
-# Province / canton codes a batch of that country writes after the town ("Milano MI", "Bern BE", "Málaga MA")
-_PROVINCES = {code: set(codes.split()) for code, codes in {
-    "IT": "AG AL AN AO AP AQ AR AT AV BA BG BI BL BN BO BR BS BT BZ CA CB CE CH CL CN CO CR CS CT CZ EN FC FE FG FI FM "
-          "FR GE GO GR IM IS KR LC LE LI LO LT LU MB MC ME MI MN MO MS MT NA NO NU OR PA PC PD PE PG PI PN PO PR PT PU "
-          "PV PZ RA RC RE RG RI RM RN RO SA SI SO SP SR SS SU SV TA TE TN TO TP TR TS TV UD VA VB VC VE VI VR VT VV",
-    "ES": "A AB AL AV B BA BI BU C CA CC CE CO CR CS CU GC GI GR GU H HU J L LE LO LU M MA ML MU NA O OR P PM PO S SA "
-          "SE SG SO SS T TE TF TO V VA VI Z ZA",
-    "CH": "AG AI AR BE BL BS FR GE GL GR JU LU NE NW OW SG SH SO SZ TG TI UR VD VS ZG ZH",
-    "NL": "DR FL FR GE GR LI NB NH OV UT ZE ZH",
-}.items()}
 # ... and the leading digits of the postcodes of those whose code is also a country with postcodes of the same shape:
 # "50122 Firenze FI" is Florence, "00100 Helsinki FI" Finland; "3011 Bern BE" is Bern, "1000 Bruxelles BE" Belgium
 _PROVINCE_PC = {("IT", "BA"): "70", ("IT", "CZ"): "88", ("IT", "FI"): "50", ("IT", "FR"): "03", ("IT", "GR"): "58",
@@ -351,13 +341,6 @@ def postcode_in(code: str, text: str | None) -> bool:
     if code not in COUNTRIES:
         return False
     return any(_postcode_re(code).search(s) for s in _segments(unicodedata.normalize("NFKC", text or ""))[1:])
-
-
-def us_state_tail(text: str | None) -> bool:
-    """The line ends with a US state: '100 Main St, Springfield, IL', 'Holland MI'."""
-    segs = _segments(unicodedata.normalize("NFKC", text or ""))
-    last = _untail(segs[-1]) if segs else ""
-    return bool(last and (state_abbr(last) or _US_STATE_END_RE.search(last)))
 
 
 def _tail(seg: str, text: str, alone: bool) -> str | None:
@@ -528,111 +511,6 @@ def crown_dependency(code: str, text: str | None) -> str:
         return {"JE": "JE", "GY": "GG", "IM": "IM"}[m.group(1).upper()]
     names = {fold(s) for s in _segments(unicodedata.normalize("NFKC", text or ""))}
     return next((c for c in ("JE", "GG", "IM") if names & {fold(n) for n in COUNTRIES[c].names}), code)
-
-
-# Old-style abbreviations state_abbr doesn't read ('Ala.' is also Åland's ISO3 code)
-_STATE_ABBREVS = {"ALA": "AL", "ARIZ": "AZ", "ARK": "AR", "CAL": "CA", "CALIF": "CA", "COLO": "CO", "CONN": "CT",
-                  "DEL": "DE", "FLA": "FL", "ILL": "IL", "IND": "IN", "KAN": "KS", "KANS": "KS", "MASS": "MA",
-                  "MICH": "MI", "MINN": "MN", "MISS": "MS", "MONT": "MT", "NEB": "NE", "NEBR": "NE", "NEV": "NV",
-                  "OKLA": "OK", "ORE": "OR", "OREG": "OR", "PENN": "PA", "TENN": "TN", "TEX": "TX", "WASH": "WA",
-                  "WIS": "WI", "WISC": "WI", "WYO": "WY"}
-# Country names that are part of a US state's name: in the state cell next to a ZIP they are the state, cut short
-_STATE_PARTS = {"jersey", "mexico", "island", "rhode island"}
-
-
-def state_cell(value: str | None) -> str:
-    """A state cell as ERPs export it -> the USPS code: 'ＤＥ' / 'M.D.' / 'Ala.' / 'Delaware (DE)' / 'DE - Delaware'
-    -> 'DE' / 'MD' / 'AL' / 'DE'; '' when it is not one US state ('Germany (DE)' is not)."""
-    v = unicodedata.normalize("NFKC", value or "").strip()
-    letters = re.sub(r"[\s.]", "", v).upper()
-    if st := state_abbr(v) or state_abbr(v.replace(".", "")) or (  # 'ALA' is Åland's code, 'Ala.' Alabama
-            _STATE_ABBREVS.get(letters, "") if "." in v or letters not in _ISO3 else ""):
-        return st
-    parts = [p for p in re.split(r"[()\[\]【】/|,;:]|\s[-–—]\s", v) if p.strip()]
-    codes = {state_abbr(p) for p in parts}
-    return codes.pop() if len(parts) > 1 and len(codes) == 1 else ""
-
-
-def structured_country(street: str | None, city: str | None, state: str | None, zip_: str | None) -> str | None:
-    """The country named in a structured request's cells. A US state is the US; a country can be written in the
-    state cell ('England', 'France' - a code there next to a US ZIP is the state), after the city ('Berlin, Germany')
-    or in a pasted one-line street; a city cell that is only a country name is a town (Greece NY, Holland MI),
-    except a city-state with its postcode ('Luxembourg' + 'L-1648'). The unit is never read (a recipient's katakana
-    name there is not Japan)."""
-    if state_cell(state):
-        return "US"
-    us_zip = bool(re.fullmatch(r"\s*\d{5}(?:-\d{4})?\s*", zip_ or ""))
-    if street and (code := country_in_text(street)) and not (us_zip and code == "JP"):
-        return code
-    if state and (code := known_country(state)) and not (us_zip and (
-            re.fullmatch(r"[A-Za-z]{2,3}", re.sub(r"[\s.]", "", unicodedata.normalize("NFKC", state)))
-            or fold(state) in _STATE_PARTS or (fold(state) in _AMBIGUOUS and (
-                _US_SHAPED_RE.search(street or "") or not (code in COUNTRIES and re.fullmatch(
-                    rf"(?:{COUNTRIES[code].postcode})", zip_.strip(), re.I))
-                or (not COUNTRIES[code].number_first and re.match(r"\s*\d+[A-Za-z]?\s+\D", street or "")))))):
-        return code  # 'France' + 75001, but a US town in the state cell ('Holland' + 49423, 'Greece' by '100 Broadway')
-    if city:
-        if code := _BY_NAME.get(fold(city)):
-            if (fold(city) in _CITY_STATE_NAMES and code in COUNTRIES and zip_
-                    and re.fullmatch(rf"(?:{COUNTRIES[code].postcode})", zip_.strip(), re.I)):
-                return code
-        elif (code := country_in_text(city)) and code != "JP" and not (us_zip and not (
-                code in COUNTRIES and re.fullmatch(rf"(?:{COUNTRIES[code].postcode})", zip_.strip(), re.I))):
-            return code  # "Paris, France" + 75001
-    if not us_zip and (is_japanese(", ".join(p for p in (street, city, state, zip_) if p))
-                       or is_japanese("".join(p for p in (state, city, street) if p))):  # 新宿区 + 西新宿2-8-1
-        return "JP"
-    return None
-
-
-# a street written number first the French / Italian / Spanish way: "1 Rue du Seyon", "10 Via Roma", "1 Calle Larios"
-_ROMANCE_FIRST_RE = re.compile(r"\d+[A-Za-z]?,?\s+(?:rue|chemin|quai|via|viale|piazza|piazzale|corso|largo|calle|avenida"
-                               r"|avda|plaza|paseo|carrer|camino|ronda)\b", re.I)
-
-
-def default_wins(default: str | None, text: str | None, state: str | None = None, zip_: str | None = None,
-                 code: str | None = None) -> bool:
-    """In a batch whose default is `default`, the trailing code that looks like a US state (or a foreign country) is
-    that country's own code or one of its provinces: "Unter den Linden 77, Berlin, DE" in a German batch, "Via Roma
-    10, Milano MI 20121" (Milan, not Michigan), "Calle Larios 1, Málaga MA 29005", "50122 Firenze FI" (not Finland) -
-    unless the line is American after all: a "123 Main St" street, a PO box, 'USA', or a ZIP of that state (which
-    only a street written the European way, "Via Roma 10", outweighs: Trento TN 38122 / Memphis TN 38122).
-    `state` / `zip_`: a structured row's cells (`text` is then the joined row). `code`: the country the line itself
-    names ('FI' for "50122 Firenze FI"), which the default only beats with its own postcode in the line."""
-    if default not in COUNTRIES:
-        return False
-    t = unicodedata.normalize("NFKC", text or "")
-    segs = _segments(t)
-    if not segs or any(_BY_NAME.get(fold(s)) == "US" for s in segs):
-        return False
-    last = _untail(segs[-1])
-    if state is not None:  # '(MI)' / 'M.I.' as state_cell reads them
-        tok, z = re.sub(r"[\s.()\[\]【】]", "", unicodedata.normalize("NFKC", state)), (zip_ or "").strip()
-    elif m := re.search(r"(?:^|\s)([A-Za-z]{1,2})\.?(?:\s+(\d{5})(?:-\d{4})?)?$", last):
-        tok, z = m.group(1), m.group(2) or ""
-    elif (len(segs) > 1 and re.fullmatch(r"\d{5}", last)
-          and (m := re.search(r"(?:^|\s)([A-Za-z]{1,2})$", _untail(segs[-2])))):
-        tok, z = m.group(1), last  # "Via Roma 10, Milano, MI, 20121"
-    else:
-        return False
-    tok = tok.upper()
-    if _US_SHAPED_RE.search(t) and not (tok == default and COUNTRIES[default].number_first):
-        return False  # "123 Main St" (but "12 Tower Road, Sliema, MT" in a Maltese batch is Malta)
-    if tok not in _PROVINCES.get(default, set()) | {default} or (
-            code not in (None, "US") and not _postcode_re(default).search(t)):
-        return False  # "8001 Zürich CH" in an Italian batch is Switzerland, not Chieti
-    if (code not in (None, "US", default) and code in COUNTRIES and _postcode_re(code).search(t)
-            and not _province_postcode(default, tok, t)):
-        return False  # "75001 Paris, FR" is France, not Frosinone (03xxx); "50122, Firenze, FI" is Florence
-    if (tok != default and re.match(r"\d+[A-Za-z]?\s+\D", segs[0]) and not _ROMANCE_FIRST_RE.match(segs[0])
-            and not _postcode_re(default).search(t)):
-        return False  # a US street, number first, and no postcode of the default: "1 Embarcadero Center, ..., CA"
-    if re.fullmatch(r"\d{5}(?:-\d{4})?", z) and us_zip_fits(tok, z) and (tok in _STATES or tok in _ZIP3):
-        if tok in ("AA", "AE", "AP") or _UNIT_PART_RE.match(segs[0]) or not (
-                re.fullmatch(rf"(?:{COUNTRIES[default].postcode})", z[:5])
-                and re.fullmatch(r"\D+\s\d+[A-Za-z]?", segs[0])):
-            return False  # "Wilmington, DE 19801" stays Delaware, "Unit 5, PSC 1234, APO AP 96204" a US base
-    return True
 
 
 def strip_country(segments: list[str], code: str = "") -> tuple[list[str], list[str]]:

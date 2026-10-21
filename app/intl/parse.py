@@ -839,63 +839,6 @@ def _finish(a: IntlAddress, c: Country, removed: list[str]) -> IntlAddress:
     return a
 
 
-def parse_structured(c: Country, street: str, city: str = "", postcode: str = "", unit: str = "") -> IntlAddress:
-    """Separate columns. The street column can still hold more than the street ("Vesterbrogade 10, 3. th.",
-    "c/o Müller, Hauptstraße 12", "Calle Mayor, 5"), and Address 1 / Address 2 columns put a flat or building first
-    ("Flat 3" + "10 Downing Street")."""
-    a = IntlAddress(raw=", ".join(p for p in (prep(street), prep(unit), prep(postcode), prep(city)) if p), country=c.code)
-    parts = []
-    for s in [s.strip() for s in _normalize(street).split(",") if s.strip()]:
-        s, junk = _clean(s, c.code)
-        a.extra += junk
-        if s:
-            parts.append(s)
-    for s in [s for s in parts if po_box(s, c)]:  # "Postfach 1234" in the street column: a mailbox, as in parse_line
-        a.po_box = a.po_box or s
-        parts.remove(s)
-    u = _clean(prep(unit))[0]
-    if u and not is_unit_line(u) and re.search(r"[^\W\d_]", u) and re.search(r"\d", u) and _pick_street([u], c) is not None \
-            and _pick_street(parts, c) is None:
-        parts, u = [u, *parts], ""  # Address 2 holds the street: "Flat 3" / "10 Downing Street"
-    parts = _merge_numbers(parts, c, True)
-    i = _pick_street(parts, c)
-    if i is None and u and _number_only(u, c) and parts:  # the number in its own column: "Hauptstraße" + "12"
-        parts[0], u = f"{parts[0]} {u}" if not c.number_first else f"{u} {parts[0]}", ""
-        i = _pick_street(parts, c)
-    if i is not None:
-        a.street, a.number, a.unit, rest = _split(parts[i], c)
-        if re.search(r"[^\W_]", rest):
-            a.extra.append(rest)
-    elif parts:
-        i = 0
-        a.street = parts[0]
-        if _NO_NUMBER_RE.search(a.street):
-            a.street, a.no_number = _NO_NUMBER_RE.sub("", a.street).strip(" ,-"), True
-    for j, s in enumerate(parts):
-        if j == i:
-            continue
-        if is_unit_line(s):
-            a.unit = ", ".join(p for p in (a.unit, s) if p)
-        elif po_box(s, c):
-            a.po_box = a.po_box or s
-        else:
-            a.extra.append(s)
-    if u:
-        a.unit = ", ".join(p for p in (a.unit, u) if p)
-    a.city = prep(city)
-    pc = prep(postcode)
-    if pc:
-        m = _pc_regex(c).search(pc)
-        if m:
-            a.postcode = m.group("pc").upper()
-        elif re.fullmatch(r"\d{1,6}", pc) and (padded := _pad(pc, a.city or "x", c)):
-            a.postcode = padded
-            a.warnings.append(f"postcode '{pc}' is missing its leading zeros; read as {padded}")
-        else:
-            a.postcode = pc.upper()
-    return _finish(a, c, [])
-
-
 def city_matches(want: str, have: str | None) -> bool | None:
     if not want or not have:
         return None

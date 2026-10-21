@@ -5,7 +5,12 @@ import pytest
 
 from app.intl import countries as C
 from app.intl.match import decide
-from app.intl.parse import parse_line, parse_structured
+from app.intl.parse import parse_line
+
+
+def _cols(c, street, city="", postcode=""):
+    """Street / city / postcode columns as the batch page joins them into one line."""
+    return parse_line(", ".join(p for p in (street, f"{postcode} {city}".strip()) if p), c)
 
 CC = C.COUNTRIES
 
@@ -179,7 +184,7 @@ def test_r4_9_aargau_town_with_its_canton_is_still_the_town(text, city):
 # -------------------------------------------------------------- [11] structured 'Town, County' city column
 
 def test_r4_11_structured_town_comma_county_has_no_trailing_comma():
-    a = parse_structured(CC["GB"], "10 Market Place", "Kendal, Cumbria", "LA9 4TN")
+    a = _cols(CC["GB"], "10 Market Place", "Kendal, Cumbria", "LA9 4TN")
     assert a.city == "Kendal" and "Cumbria" in a.extra
 
 

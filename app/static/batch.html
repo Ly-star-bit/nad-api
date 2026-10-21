@@ -146,9 +146,7 @@
     </div>
     <input id="pick" type="file" accept=".csv,.tsv,.txt,text/csv,text/plain" hidden>
     <div class="opts">
-      <label>没写国家的行按 <select id="cc" aria-label="默认国家"><option value="">自动识别</option></select></label>
-      <label><input id="ov" type="checkbox" checked>美国：NAD 查不到时用 Overture 补查</label>
-      <label><input id="zf" type="checkbox">定位失败时按 ZIP 范围搜索（较慢）</label>
+      <label>没有国家列的行按 <select id="cc" aria-label="国家"><option value="">自动识别</option></select></label>
     </div>
     <div id="keyrow" class="keyrow" hidden>
       <label for="key">API Key</label>
@@ -177,7 +175,7 @@ const MISSING = '缺少街道地址，不会校验';
 
 const $ = (s) => document.querySelector(s);
 const form = $('#form'), box = $('#box'), text = $('#text'), filebox = $('#filebox'), meta = $('#meta');
-const go = $('#go'), pick = $('#pick'), cc = $('#cc'), ov = $('#ov'), zf = $('#zf'), out = $('#out');
+const go = $('#go'), pick = $('#pick'), cc = $('#cc'), out = $('#out');
 const key = setupKey($('#keyrow'), $('#key'));
 
 // Result buckets in display order; the counts, the meter and the filter chips all follow it.
@@ -268,11 +266,22 @@ function joinCells(cells) {
     (i === 0 ? c : s + (/^\d{3,5}(-\d{4})?$/.test(c) && /^[A-Za-z]{2}$/.test(a[i - 1]) ? ' ' : ', ') + c), '');
 }
 
+// An Address 2 column goes after the street, before the town: "1700 W Washington St Apt 2, Phoenix, AZ 85007"
+function withUnit(a, u) {
+  if (!a || !u) return a;
+  const i = a.indexOf(',');
+  return i < 0 ? `${a} ${u}` : `${a.slice(0, i)} ${u}${a.slice(i)}`;
+}
+
 // The codes /countries lists (filled once it has loaded; until then no column is read as countries)
 let COUNTRIES = new Set();
 
-const oneLine = (f) => [[f.street, f.unit].filter(Boolean).join(' '), f.city, [f.state, f.zip].filter(Boolean).join(' '), f.country]
-  .filter(Boolean).join(', ');
+// Columns -> the one line the server reads: "street unit, city, state zip". Columns written in kanji go the Japanese
+// way, largest place first ("〒160-0023 東京都新宿区西新宿2-8-1 ビル5F"), as one Japanese line would be.
+const CJK = /[\u3040-\u30ff\u4e00-\u9fff]/;
+const oneLine = (f) => (CJK.test(f.street) && [f.city, f.state].every((v) => !v || CJK.test(v))
+  ? [f.zip, f.state + f.city + f.street, f.unit].filter(Boolean).join(' ')
+  : [[f.street, f.unit].filter(Boolean).join(' '), f.city, [f.state, f.zip].filter(Boolean).join(' ')].filter(Boolean).join(', '));
 
 // table (array of rows of cells) -> { header, rows: [{ cells, req, input }], total, info, bad }
 function buildSource(table, picked = '') {
@@ -309,21 +318,19 @@ function buildSource(table, picked = '') {
     return { header, rows: [], total: data.length, bad: true, info: '表头里没有地址列：需要 address，或者 street（可配合 city / state / zip）' };
   }
   if (hasHeader && ('street' in map || ['city', 'state', 'zip'].some((k) => k in map))) {
-    // Columns -> structured request; the server geocodes those fields directly.
+    // Columns -> one line, and the country column as the row's country
     const streetKey = 'street' in map ? 'street' : 'address';
     info = '按列组合：' + [streetKey, 'unit', 'city', 'state', 'zip', 'country'].filter((k) => k in map).map(name).join(' + ');
     make = (r) => {
-      const f = { street: col(r, streetKey), unit: col(r, 'unit'), city: col(r, 'city'), state: col(r, 'state'), zip: col(r, 'zip'),
-        country: col(r, 'country') };
-      const req = Object.fromEntries(Object.entries(f).filter(([, v]) => v));
-      return { req: f.street ? req : null, input: oneLine(f) };
+      const f = { street: col(r, streetKey), unit: col(r, 'unit'), city: col(r, 'city'), state: col(r, 'state'), zip: col(r, 'zip') };
+      const a = oneLine(f), c = col(r, 'country');
+      return { req: f.street ? (c ? { address: a, country: c } : { address: a }) : null, input: a, q: a, country: c };
     };
   } else if (hasHeader) {
     info = '地址列：' + name('address') + ['unit', 'country'].filter((k) => k in map).map((k) => ` + ${name(k)}`).join('');
     make = (r) => {
-      const a = col(r, 'address'), u = col(r, 'unit'), c = col(r, 'country');
-      const req = a ? Object.fromEntries(Object.entries({ address: a, unit: u, country: c }).filter(([, v]) => v)) : null;
-      return { req, input: a, q: a, unit: u, country: c };
+      const a = withUnit(col(r, 'address'), col(r, 'unit')), c = col(r, 'country');
+      return { req: a ? (c ? { address: a, country: c } : { address: a }) : null, input: a, q: a, country: c };
     };
   } else if (width === 1) {
     info = '每行一个地址';
@@ -331,15 +338,14 @@ function buildSource(table, picked = '') {
   } else if (!picked && data.every((r) => !r[width - 1] || COUNTRIES.has(r[width - 1].toUpperCase()))
              && data.some((r) => r[width - 1] && !US_STATES.test(r[width - 1]))) {
     // "Damrak 1 | 1012 LG Amsterdam | NL": a last column holding only codes of countries we cover reads as the
-    // country. A headerless column can also be a flag or a province (No, SI, FI for Firenze), so each row sends its
-    // code as that row's default only: a US state + ZIP or a country written in the line still wins on the server.
-    // A code that is also a US state (DE, MT, AL…) stays in the line, and a default picked below turns this off.
-    info = '没有识别到表头：最后一列按国家代码处理（只在地址本身看不出国家时才用）；如果这一列其实是省份或别的代码，请在下方选默认国家';
+    // country. A headerless column can also be a flag or a province (No, SI, FI for Firenze): a country picked below
+    // turns this off. A code that is also a US state (DE, MT, AL…) stays in the line.
+    info = '没有识别到表头：最后一列按国家代码处理；如果这一列其实是省份或别的代码，请在下方选国家';
     make = (r) => {
       const c = (r[width - 1] || '').toUpperCase(), rest = r.slice(0, width - 1);
       if (!c || US_STATES.test(c)) { const a = joinCells(r); return { req: a ? { address: a } : null, input: a }; }
       const a = joinCells(rest);
-      return { req: a ? { address: a, default_country: c } : null, input: a, q: a, country: c };
+      return { req: a ? { address: a, country: c } : null, input: a, q: a, country: c };
     };
   } else {
     info = '没有识别到表头，各列已合并成一行地址';
@@ -404,7 +410,7 @@ const bucket = (r) => (r.state !== 'done' ? 'pending' : r.result ? r.result.stat
 // a row the server refused (422: an unsupported country, an unreadable request) would only fail again
 // The server's field limits (app/models.py): one over-long cell would get the whole chunk of 20 refused, so such a row
 // is marked here and never sent.
-const LIMITS = { address: 300, street: 200, unit: 50, city: 100, state: 50, zip: 20, country: 60 };
+const LIMITS = { address: 300, country: 60 };
 const tooLong = (req) => {
   const f = req && Object.keys(LIMITS).find((k) => (req[k] || '').length > LIMITS[k]);
   return f ? `${f} 超过 ${LIMITS[f]} 个字符，请删减后再校验` : null;
@@ -422,7 +428,7 @@ function startRun() {
       return { ...r, n: i + 1, state: error ? 'done' : 'pending', result: null, error };
     }),
     activeMs: 0, segStart: 0, netDone: 0, saved: true,
-    defaultCountry: cc.value,  // the default at the start: changing the picker later doesn't move finished rows
+    defaultCountry: cc.value,  // the picker at the start: changing it later doesn't move finished rows
   };
   dirty = false;
   filter = 'all';
@@ -443,9 +449,8 @@ async function pump() {
       if (!chunk.length) break;
       chunk.forEach((r) => { r.state = 'running'; r.owner = me; });
       render();
-      const opts = { overture_fallback: ov.checked, zip_fallback: zf.checked };
-      // the default applies only where neither a country column nor the address itself names a country
-      const withCountry = (req) => (req.country || req.default_country || !R.defaultCountry ? req : { ...req, default_country: R.defaultCountry });
+      // the picked country applies to rows without a country column; with neither, the server reads the address
+      const withCountry = (req) => (req.country || !R.defaultCountry ? req : { ...req, country: R.defaultCountry });
       const hadKey = key.has();
       const mine = (r) => r.owner === me && r.state === 'running';
       const land = (it) => {
@@ -461,7 +466,7 @@ async function pump() {
         res = await fetch('v1/verify/batch?stream=true', {
           method: 'POST', signal: me.signal,
           headers: { 'Content-Type': 'application/json', ...key.headers() },
-          body: JSON.stringify({ addresses: chunk.map((r) => ({ ...withCountry(r.req), ...opts })) }),
+          body: JSON.stringify({ addresses: chunk.map((r) => withCountry(r.req)) }),
         });
         if (res.ok && /ndjson/.test(res.headers.get('content-type') || '')) await readLines(res, land);
         else body = await res.json().catch(() => null);
@@ -694,7 +699,7 @@ function rowHtml(r) {
     }
     if (r.req && !tooLong(r.req)) more = `<a href="${esc(detailUrl(r))}" target="_blank" rel="noopener">详情</a>`;
   }
-  const input = esc(r.input) + (r.unit ? ` <span class="na">${esc(r.unit)}</span>` : '');
+  const input = esc(r.input);
   return `<tr${r.state === 'done' ? '' : ' class="wait"'}><td class="c-n">${r.n}</td>
     <td class="c-in">${input || '<span class="na">（空）</span>'}</td><td class="c-st">${st}</td><td class="c-m">${m}</td>
     <td class="c-src">${from}</td><td class="c-conf">${conf}</td><td class="c-go">${more}</td></tr>`;
@@ -709,10 +714,8 @@ function sourceText(x) {
 function detailUrl(r) {
   const p = new URLSearchParams({ q: r.q || r.input });
   // the country the row was checked in (the server's answer), else what was sent for it
-  const c = (r.result && r.result.country) || (r.req && (r.req.country || r.req.default_country)) || (run && run.defaultCountry) || '';
+  const c = (r.result && r.result.country) || (r.req && r.req.country) || (run && run.defaultCountry) || '';
   if (c) p.set('country', c);
-  if (zf.checked) p.set('zip_fallback', '1');
-  if (!ov.checked) p.set('overture', '0');
   return `./?${p}`;
 }
 
@@ -721,9 +724,9 @@ function guideHtml() {
   return `<section class="legend"><h2>支持的输入</h2><table>
     ${row('每行一个地址', '一行写完整地址，例如 <code>1700 W Washington St, Phoenix, AZ 85007</code>')}
     ${row('从 Excel 复制', '直接粘贴多列。第一行是表头时按列名识别，没有表头就把各列按顺序拼成一行地址')}
-    ${row('上传 CSV', '表头用 <code>address</code>，或者 <code>street</code> / <code>unit</code> / <code>city</code> / <code>state</code> / <code>zip</code>，也认“地址、街道、城市、州、邮编”，以及订单导出里带前缀的列名，如 Shipping Address 1、Ship City、收件人地址。UTF-8 和 GBK 编码都可以')}
-    ${row('其他国家', '有 <code>country</code>（或“国家”）列时按它判断，填 ISO 代码（DE、JP）或国名（Germany、德国）都可以；没有国家列时，地址末尾写了国家名（…, Berlin, Germany）或者是日文地址的会自动识别，其余按上方的默认国家，默认是美国')}
-    ${row('导出', '原表的列原样保留，后面先追加拆分出的 <code>parsed_country</code>、<code>parsed_state</code>、<code>parsed_city</code>、<code>parsed_zip</code>、<code>parsed_address1</code>（门牌 + 街道）、<code>parsed_address2</code>（单元），再追加 <code>verify_status</code>、<code>verify_verdict</code>、<code>verify_matched_address</code>、<code>verify_nearest_number</code>（门牌不存在时同街最近的门牌）、<code>verify_zip_should_be</code>（ZIP 填错时记录里的 ZIP）等结果列')}
+    ${row('上传 CSV', '表头用 <code>address</code>，或者 <code>street</code> / <code>unit</code> / <code>city</code> / <code>state</code> / <code>zip</code>（按列拼成一行地址再校验），也认“地址、街道、城市、州、邮编”，以及订单导出里带前缀的列名，如 Shipping Address 1、Ship City、收件人地址。UTF-8 和 GBK 编码都可以')}
+    ${row('其他国家', '有 <code>country</code>（或“国家”）列时按它查，填 ISO 代码（DE、JP）或国名（Germany、德国）都可以；没有国家列的行按上方选的国家查；选“自动识别”时，地址末尾写了国家名（…, Berlin, Germany）或者是日文地址的会自动识别，其余按美国')}
+    ${row('导出', '原表的列原样保留，后面先追加拆分出的 <code>parsed_country</code>、<code>parsed_state</code>、<code>parsed_city</code>、<code>parsed_zip</code>、<code>parsed_address1</code>（门牌 + 街道）、<code>parsed_address2</code>（单元；已核实的行按核实到的记录拆分），再追加 <code>verify_status</code>、<code>verify_verdict</code>、<code>verify_matched_address</code>、<code>verify_nearest_number</code>（门牌不存在时同街最近的门牌）、<code>verify_zip_should_be</code>（ZIP 填错时记录里的 ZIP）等结果列')}
   </table></section>`;
 }
 

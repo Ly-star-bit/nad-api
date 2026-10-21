@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 Status = Literal[
     "verified",        # house number + street (+ unit if given) found in NAD
@@ -19,44 +19,15 @@ Status = Literal[
 
 
 class VerifyRequest(BaseModel):
-    """Either `address` (one line) or `street` (+ optional city/state/zip) is required. Outside the US, `zip` is
-    the postcode and `state` is ignored."""
+    """One address as a single line, and optionally its country."""
 
-    # Length limits: real addresses are well under 200 characters, and fuzzy street matching costs grow with the
+    # Length limit: real addresses are well under 200 characters, and fuzzy street matching costs grow with the
     # square of the length (a 100 KB street name against 2000 nearby points would hold the server for a minute).
-    address: str | None = Field(None, max_length=300, examples=["1700 W Washington St, Phoenix, AZ 85007"])
-    street: str | None = Field(None, max_length=200, examples=["1700 W Washington St"])
-    unit: str | None = Field(None, max_length=50, examples=["Apt 2"])
-    city: str | None = Field(None, max_length=100, examples=["Phoenix"])
-    state: str | None = Field(None, max_length=50, examples=["AZ"])
-    zip: str | None = Field(None, max_length=20, examples=["85007"])
+    address: str = Field(..., min_length=1, max_length=300, examples=["1700 W Washington St, Phoenix, AZ 85007"])
     country: str | None = Field(
         None, max_length=60, examples=["US", "DE", "Japan"],
-        description="ISO code or name (English, native or Chinese). Default: named in the address line "
-                    "('..., 10117 Berlin, Germany'), a Japanese address, else `default_country`, else US.")
-    default_country: str | None = Field(
-        None, max_length=60, examples=["DE"],
-        description="Used only when `country` is empty and the address names no country (a batch page's default): "
-                    "a country written in the address still wins.")
-    lat: float | None = Field(None, ge=-90, le=90, description="Skip geocoding and search around this point")
-    lon: float | None = Field(None, ge=-180, le=180)
-    zip_fallback: bool = Field(
-        False, description="If the Census geocoder fails, search the whole ZIP (ZCTA) area in NAD for this house number on any "
-        "street. Slower (5-20 s). Without it, only streets with the given name are searched in the ZIP area."
-    )
-    overture_fallback: bool = Field(
-        True, description="When NAD cannot confirm the address (not_covered / not_found / street_only / "
-        "upstream_error), retry against Overture Maps addresses (NAD + OpenAddresses county/city data)."
-    )
-    max_candidates: int = Field(5, ge=1, le=50)
-
-    @model_validator(mode="after")
-    def _check(self) -> "VerifyRequest":
-        if not (self.address or self.street):
-            raise ValueError("either 'address' or 'street' is required")
-        if (self.lat is None) != (self.lon is None):
-            raise ValueError("'lat' and 'lon' must be given together")
-        return self
+        description="ISO code or name (English, native or Chinese). Empty: the country named in the address "
+                    "('..., 10117 Berlin, Germany'), JP for a Japanese address, else US.")
 
 
 class BatchRequest(BaseModel):

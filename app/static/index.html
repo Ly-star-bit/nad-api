@@ -136,8 +136,6 @@
     </div>
     <div class="opts">
       <label>国家 <select id="cc" aria-label="国家"><option value="">自动识别</option></select></label>
-      <label><input id="ov" type="checkbox" checked>美国：NAD 查不到时用 Overture 补查</label>
-      <label><input id="zf" type="checkbox">定位失败时按 ZIP 范围搜索（较慢）</label>
     </div>
     <div id="keyrow" class="keyrow" hidden>
       <label for="key">API Key</label>
@@ -170,7 +168,7 @@ import { STATUS, SOURCE, sourceName, store, esc, tone, label, pct, fmtMs, setupK
 import { createMap, fit, colors, pointOf } from './static/map.js';
 
 const $ = (s) => document.querySelector(s);
-const form = $('#form'), q = $('#q'), cc = $('#cc'), ov = $('#ov'), zf = $('#zf'), out = $('#out');
+const form = $('#form'), q = $('#q'), cc = $('#cc'), out = $('#out');
 const key = setupKey($('#keyrow'), $('#key'));
 
 const LEVEL = { unit: '单元', address: '门牌', block: '番（街区）', street: '街道' };
@@ -272,14 +270,9 @@ function renderResult(r) {
   if (pt) h += `<section class="map-sec"><div id="map" class="map"></div>${mapKey(r)}</section>`;
 
   if (r.status === 'geocode_failed' && (r.country || 'US') === 'US') {
-    const noStreet = (r.notes || []).some((n) => n.includes('newer than the data'));
-    h += `<section class="sec"><p class="hint">${r.parsed && r.parsed.zip && !zf.checked
-      ? (noStreet
-        ? `街道名如果可能写错了，可以查 ZIP ${esc(r.parsed.zip)} 范围内所有街道上的 ${esc(r.parsed.house_number)} 号，需要 3–20 秒。`
-        : `可以在 ZIP ${esc(r.parsed.zip)} 的范围内直接搜索门牌，需要 3–20 秒。`)
-        + `<button type="button" class="linkbtn" data-retry-zip>按 ZIP 范围重试</button>`
-      : r.parsed && r.parsed.zip ? '已经按 ZIP 范围搜索过。请检查街道名和门牌号是否拼写正确。'
-      : '地址里没有 ZIP。补上 ZIP 后，可以在 ZIP 范围内直接搜索门牌。'}</p></section>`;
+    h += `<section class="sec"><p class="hint">${r.parsed && r.parsed.zip
+      ? `已经在 ZIP ${esc(r.parsed.zip)} 的范围内按街道名搜索过。请检查街道名和门牌号是否拼写正确。`
+      : '地址里没有 ZIP。补上 ZIP 后，会在 ZIP 范围内按街道名搜索门牌。'}</p></section>`;
   }
   if (bm && bm.match) h += checks(bm.match, r);
   h += fields(r);
@@ -391,12 +384,14 @@ function ambiguity(r) {
 }
 
 // What the input was read as, in the order an order form has it: country, state, city, postcode, line 1, line 2.
+// A verified address comes split as the matched record has it.
 function split(r) {
   const p = r.parsed || {};
   if (!Object.keys(p).length) return '';
   const jp = r.country === 'JP', cc = p.country || r.country || 'US';
   const cell = (k, v, wide) => `<div${wide ? ' class="wide"' : ''}><dt>${k}</dt>${v ? `<dd>${esc(v)}</dd>` : '<dd class="none">—</dd>'}</div>`;
-  return `<div class="k split-k">输入拆分</div><dl class="split">${[
+  const head = p.source === 'record' ? '输入拆分<span class="na">（按核实到的记录）</span>' : '输入拆分';
+  return `<div class="k split-k">${head}</div><dl class="split">${[
     cell('国家', [countryNames[cc], cc].filter(Boolean).join(' ')),
     cell(jp ? '都道府县' : '州', p.state),
     cell(jp ? '市区町村' : '城市', p.city),
@@ -502,8 +497,6 @@ function stop() {
 function syncUrl(text, push) {
   const p = new URLSearchParams({ q: text });
   if (cc.value) p.set('country', cc.value);
-  if (zf.checked) p.set('zip_fallback', '1');
-  if (!ov.checked) p.set('overture', '0');
   const url = `${location.pathname}?${p}`;
   if (url !== location.pathname + location.search) history[push ? 'pushState' : 'replaceState'](null, '', url);
 }
@@ -524,8 +517,6 @@ async function run(push) {
 
   const params = new URLSearchParams({ address: text });
   if (cc.value) params.set('country', cc.value);
-  if (!ov.checked) params.set('overture_fallback', 'false');
-  if (zf.checked) params.set('zip_fallback', 'true');
   const hadKey = key.has();
   try {
     const res = await fetch(`v1/verify?${params}`, { headers: key.headers(), signal: my.signal });
@@ -561,8 +552,6 @@ function fromUrl() {
   q.value = p.get('q') || '';
   wantCountry = p.get('country') || '';
   setCountry(wantCountry);
-  zf.checked = p.get('zip_fallback') === '1';
-  ov.checked = p.get('overture') !== '0';
   if (q.value) run(null);
   else { stop(); renderHome(); }
 }
@@ -573,7 +562,7 @@ form.addEventListener('submit', (e) => { e.preventDefault(); run(true); });
 window.addEventListener('popstate', fromUrl);
 
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-q], [data-clear], [data-cancel], [data-retry-zip], [data-copy], [data-copy-addr]');
+  const t = e.target.closest('[data-q], [data-clear], [data-cancel], [data-copy], [data-copy-addr]');
   if (!t) return;
   if (t.dataset.q != null) {
     q.value = t.dataset.q;
@@ -590,9 +579,6 @@ document.addEventListener('click', (e) => {
   } else if (t.hasAttribute('data-cancel')) {
     stop();
     renderHome();
-  } else if (t.hasAttribute('data-retry-zip')) {
-    zf.checked = true;
-    run(true);
   } else if (t.hasAttribute('data-copy')) {
     copied(t, lastJson);
   } else if (t.hasAttribute('data-copy-addr')) {

@@ -13,7 +13,7 @@ from app.intl import countries as C
 from app.intl import core, europe, japan, osm
 from app.intl.base import Lookup, Skip
 from app.intl.match import decide, num_matches, street_sim
-from app.intl.parse import parse_line, parse_structured
+from app.intl.parse import parse_line
 from app.intl.places import local_city, same_city
 from app.main import _country
 from app.models import VerifyRequest
@@ -65,13 +65,15 @@ def test_country_field_spellings():
     assert C.resolve_country("Canada") is None and C.known_country("Canada") == "CA"
 
 
-def test_explicit_country_then_text_then_default():
+def test_given_country_else_the_one_the_address_names():
     assert _country(VerifyRequest(address="Damrak 1, 1012 LG Amsterdam", country="nl")) == "NL"
-    assert _country(VerifyRequest(address="〒154-0017 東京都世田谷区世田谷4-21-27", default_country="DE")) == "JP"
-    assert _country(VerifyRequest(address="Unter den Linden 77, Berlin", default_country="DE")) == "DE"
-    assert _country(VerifyRequest(address="350 5th Ave, New York, NY 10118, USA", default_country="DE")) == "US"
-    assert _country(VerifyRequest(street="本町1-1-1", city="中央区", state="大阪府")) == "JP"
-    assert _country(VerifyRequest(street="1 Main St", city="Holland", state="MI")) == "US"
+    assert _country(VerifyRequest(address="Damrak 1, 1012 LG Amsterdam, Netherlands", country="DE")) == "DE"
+    assert _country(VerifyRequest(address="Unter den Linden 77, Berlin", country="德国")) == "DE"
+    # not given: read from the address, else the US
+    assert _country(VerifyRequest(address="〒154-0017 東京都世田谷区世田谷4-21-27")) == "JP"
+    assert _country(VerifyRequest(address="Unter den Linden 77, 10117 Berlin, Germany", country=" ")) == "DE"
+    assert _country(VerifyRequest(address="350 5th Ave, New York, NY 10118")) == "US"
+    assert _country(VerifyRequest(address="Unter den Linden 77, Berlin")) == "US"
     for req in (VerifyRequest(address="1 Main St", country="Narnia"), VerifyRequest(address="1 Main St, Toronto, Canada")):
         with pytest.raises(HTTPException) as e:
             _country(req)
@@ -120,15 +122,6 @@ def test_po_boxes_and_numberless():
         assert a.po_box and not a.number, text
     a = parse_line("Calle Mayor s/n, 28013 Madrid", CC["ES"])
     assert (a.street, a.number, a.no_number) == ("Calle Mayor", "", True)
-
-
-def test_parse_structured_columns():
-    a = parse_structured(CC["DK"], "Vesterbrogade 10, 3. th.", "København V", "1620")
-    assert (a.street, a.number, a.unit) == ("Vesterbrogade", "10", "3. th.")
-    a = parse_structured(CC["GB"], "Flat 3", "London", "SW1A 2AA", unit="10 Downing Street")
-    assert (a.street, a.number, a.unit) == ("Downing Street", "10", "Flat 3")
-    a = parse_structured(CC["DE"], "Hauptstraße", "München", "80331", unit="12")
-    assert (a.street, a.number) == ("Hauptstraße", "12")
 
 
 # --------------------------------------------------------------------------------------------- match

@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.address import StreetKey, norm_unit, parse_oneline, parse_structured, street_score
+from app.address import StreetKey, norm_unit, parse_oneline, street_score
 
 
 @pytest.mark.parametrize(
@@ -68,20 +68,10 @@ def test_parse_oneline_without_number():
     assert pa.warnings
 
 
-def test_parse_structured():
-    pa = parse_structured("11 W Washington St", "Phoenix", "az", "85003-1234", "Suite 240")
-    assert pa.house.number == 11
-    assert pa.unit == "240"
-    assert (pa.state, pa.zip5, pa.zip4) == ("AZ", "85003", "1234")
-
-
-def test_parse_structured_spreadsheet_values():
-    pa = parse_structured("1 Beacon St", "Boston", "Massachusetts", "2108")
+def test_spreadsheet_zip_in_a_line():
+    pa = parse_oneline("1 Beacon St, Boston, MA 2108")
     assert (pa.state, pa.zip5) == ("MA", "02108")
     assert "02108" in pa.warnings[0]
-    # only padded when the result is a ZIP of that state
-    pa = parse_structured("1 Main St", "Phoenix", "AZ", "8500")
-    assert pa.zip5 == "" and "unrecognized" in pa.warnings[0]
 
 
 def test_po_box_gets_a_specific_warning():

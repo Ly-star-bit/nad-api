@@ -9,7 +9,13 @@ from app.intl import countries as C
 from app.intl import core
 from app.intl.base import Lookup
 from app.intl.match import decide
-from app.intl.parse import is_unit_line, parse_line, parse_structured
+from app.intl.parse import is_unit_line, parse_line
+
+
+def _cols(c, street, city="", postcode=""):
+    """Street / city / postcode columns as the batch page joins them into one line."""
+    return parse_line(", ".join(p for p in (street, f"{postcode} {city}".strip()) if p), c)
+
 
 CC = C.COUNTRIES
 
@@ -118,7 +124,7 @@ def test_r05_town_glued_to_an_english_street():
     # without a postcode too when what follows is place-shaped (round-3 [17]: gluing it lost the town), never in a
     # street column
     _line("GB", "10 Downing Street London", street="Downing Street", city="London")
-    a = parse_structured(CC["IE"], "23 O'Connell Street Upper", "Dublin 1", "D01 C3W7")
+    a = _cols(CC["IE"], "23 O'Connell Street Upper", "Dublin 1", "D01 C3W7")
     assert (a.street, a.number) == ("O'Connell Street Upper", "23")
 
 
@@ -138,12 +144,12 @@ def test_r05_town_glued_to_an_english_street():
     ("DE", "c/o Müller, Hauptstraße 12", "Hauptstraße", "12"),   # a recipient part is still not glued to the street
 ])
 def test_r06_comma_between_street_and_number_in_the_street_column(cc, street_col, street, number):
-    a = parse_structured(CC[cc], street_col, "X", "")
+    a = _cols(CC[cc], street_col, "X", "")
     assert (a.street, a.number) == (street, number)
 
 
 def test_r06_street_column_verifies():
-    a = parse_structured(CC["FR"], "18 bis, rue de la République", "Lyon", "69002")
+    a = _cols(CC["FR"], "18 bis, rue de la République", "Lyon", "69002")
     assert _decide(a, [_c("18bis", "Rue de la République", "69002", "Lyon")])["status"] == "verified"
 
 
@@ -268,7 +274,7 @@ def test_s09_po_boxes():
         a = parse_line(text, CC["FI"])
         assert a.po_box and not a.number and a.postcode == "00101", text
     for cc, col in (("DE", "Postfach 1234"), ("FR", "BP 123"), ("NL", "Postbus 123")):
-        a = parse_structured(CC[cc], col, "X", "")
+        a = parse_line(col, CC[cc])
         assert a.po_box == col and not a.street and any("PO box" in w for w in a.warnings), col
     _line("CH", "Postfach, 8021 Zürich", po_box="Postfach", postcode="8021", city="Zürich")
     _line("GB", "PO Box 123, London SW1A 2AA", po_box="PO Box 123", postcode="SW1A 2AA", city="London")

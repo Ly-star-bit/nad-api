@@ -208,20 +208,6 @@ class Upstream:
         )
         return _first_census_match(data)
 
-    async def census_geocode_structured(self, street: str, city: str, state: str, zip_code: str) -> dict | None:
-        params = {
-            "street": street, "benchmark": config.CENSUS_BENCHMARK,
-            "vintage": config.CENSUS_VINTAGE, "layers": "Counties", "format": "json",
-        }
-        if city:
-            params["city"] = city
-        if state:
-            params["state"] = state
-        if zip_code:
-            params["zip"] = zip_code
-        data = await self._get_json("census_geocoder", f"{config.CENSUS_GEOCODER_URL}/geographies/address", params)
-        return _first_census_match(data)
-
     async def census_county_at(self, lat: float, lon: float) -> dict | None:
         data = await self._get_json(
             "census_geocoder",

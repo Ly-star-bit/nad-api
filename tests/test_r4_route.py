@@ -7,11 +7,12 @@ from fastapi import HTTPException
 from app.intl import countries as C
 from app.main import _country
 from app.models import VerifyRequest
+from batch_line import as_request
 
 
 def route(**req) -> str:
     try:
-        return _country(VerifyRequest(**req))
+        return _country(VerifyRequest(**as_request(req)))
     except HTTPException as e:
         assert e.status_code == 422
         return "422"
@@ -23,35 +24,6 @@ def line(text, **kw) -> dict:
 
 def cell(street, city, state, zip_, **kw) -> dict:
     return {"street": street, "city": city, "state": state, "zip": zip_, **kw}
-
-
-# [0]: a structured province cell with brackets or dots, under the batch default
-_PR = [("Milano", "MI", "20121"), ("Catania", "CT", "95124"), ("Palermo", "PA", "90133"), ("Cagliari", "CA", "09124"),
-       ("Como", "CO", "22100"), ("Messina", "ME", "98122"), ("Trento", "TN", "38122"), ("Parma", "PR", "43121"),
-       ("Modena", "MO", "41121"), ("Varese", "VA", "21100"), ("Vicenza", "VI", "36100"), ("Matera", "MT", "75100"),
-       ("Alessandria", "AL", "15121"), ("Arezzo", "AR", "52100"), ("Mantova", "MN", "46100"), ("Massa", "MS", "54100"),
-       ("Oristano", "OR", "09170"), ("Rieti", "RI", "02100"), ("Viterbo", "VT", "01100"), ("Firenze", "FI", "50122"),
-       ("Bari", "BA", "70121"), ("Grosseto", "GR", "58100"), ("Frosinone", "FR", "03100"), ("Catanzaro", "CZ", "88100"),
-       ("Latina", "LT", "04100"), ("Pistoia", "PT", "51100")]
-
-
-@pytest.mark.parametrize("req, code", [
-    *[(cell("Via Roma 10", town, f"({pr})", cap, default_country="IT"), "IT") for town, pr, cap in _PR],
-    (cell("Via Roma 10", "Milano", "MI.", "20121", default_country="IT"), "IT"),
-    (cell("Via Roma 10", "Milano", "M.I.", "20121", default_country="IT"), "IT"),
-    (cell("Via Roma 10", "Milano", "[MI]", "20121", default_country="IT"), "IT"),
-    (cell("Via Etnea 1", "Catania", "(CT)", "95124", default_country="IT"), "IT"),
-    (cell("Calle Larios 1", "Málaga", "(MA)", "29005", default_country="ES"), "ES"),
-    (cell("Rue du Seyon 1", "Neuchâtel", "(NE)", "2000", default_country="CH"), "CH"),
-    (cell("Damrak 1", "Amsterdam", "(NH)", "1012 LG", default_country="NL"), "NL"),
-    (cell("Unter den Linden 77", "Berlin", "(DE)", "10117", default_country="DE"), "DE"),
-    # a ZIP of that state and a US street stay American
-    (cell("1 Woodward Ave", "Detroit", "(MI)", "48226", default_country="IT"), "US"),
-    (cell("100 Main St", "Detroit", "M.I.", "48226", default_country="IT"), "US"),
-    (cell("PO Box 5", "Memphis", "(TN)", "38122", default_country="IT"), "US"),
-])
-def test_r4_0_bracketed_province_cell_under_the_default(req, code):
-    assert route(**req) == code
 
 
 # [1]: a unit part or a street without a USPS type word never makes a trailing AL/MD/DE/ME/MT a country
@@ -86,55 +58,6 @@ def test_r4_1_the_country_code_after_its_own_postcode_still_counts(text, code):
     assert route(**line(text)) == code
 
 
-# [23]: a foreign code with its own postcode beats a batch default that has a province of that name, unless the
-# postcode is that province's
-@pytest.mark.parametrize("text, default, code", [
-    ("10 Rue de Rivoli, 75001 Paris, FR", "IT", "FR"), ("Mannerheimintie 1, 00100 Helsinki, FI", "IT", "FI"),
-    ("Rue de la Loi 16, 1000 Bruxelles, BE", "CH", "BE"), ("10 Rue de Rivoli, 75001 Paris FR", "IT", "FR"),
-    ("Mannerheimintie 1, 00100 Helsinki FI", "IT", "FI"), ("Rue de la Loi 16, 1000 Bruxelles BE", "CH", "BE"),
-    ("Mannerheimintie 30, 00100 Helsinki FI", "IT", "FI"), ("Grote Markt 1, 2000 Antwerpen BE", "CH", "BE"),
-    ("Ermou 10, 10563 Athens GR", "ES", "GR"), ("Njegoševa 1, 81000 Podgorica, ME", "IT", "ME"),
-    ("1 Avenue de Monte-Carlo, 98000 Monaco, MC", "IT", "MC"),
-    # the province's own postcode: the default
-    ("Piazza della Signoria 5, 50122, Firenze, FI", "IT", "IT"), ("Bundesplatz 3, 3011, Bern, BE", "CH", "CH"),
-    ("Bundesplatz 3, 3011 Bern BE", "CH", "CH"), ("Via Roma 1, 03100 Frosinone FR", "IT", "IT"),
-    ("Via Sparano 1, 70121 Bari, BA", "IT", "IT"), ("Calle Sierpes 1, 41004 Sevilla, SE", "ES", "ES"),
-    ("Corso Matteotti 1, 62100 Macerata, MC", "IT", "IT"), ("Via Garibaldi 1, 98122 Messina, ME", "IT", "IT"),
-    ("Pilatusstrasse 1, 6003 Luzern, LU", "CH", "CH"), ("Markt 1, 6211 CM Maastricht, LI", "NL", "NL"),
-    ("Bahnhofstrasse 1, 8001 Zürich CH", "IT", "CH"),
-])
-def test_r4_23_foreign_code_with_its_own_postcode_beats_the_default(text, default, code):
-    assert route(**line(text, default_country=default)) == code
-
-
-# [24]: a US street, number first, a state that is also a province of the default, no ZIP and no postcode
-@pytest.mark.parametrize("req, code", [
-    (line("1 Embarcadero Center, San Francisco, CA", default_country="IT"), "US"),
-    (line("1 Embarcadero Center, San Francisco, CA", default_country="ES"), "US"),
-    (line("100 Broadway, Denver, CO", default_country="IT"), "US"),
-    (line("1 Constitution Plaza, Hartford, CT", default_country="IT"), "US"),
-    (line("233 Broadway, Nashville, TN", default_country="IT"), "US"),
-    (line("200 Pier 39, San Francisco, CA", default_country="ES"), "US"),
-    (line("1 Embarcadero Ctr, San Francisco, CA", default_country="IT"), "US"),
-    (line("1234 Broadway, Detroit, MI", default_country="IT"), "US"),
-    (line("100 Broadway, Boston, MA", default_country="ES"), "US"),
-    ({"street": "1 Embarcadero Center", "city": "San Francisco", "state": "CA", "default_country": "IT"}, "US"),
-    ({"street": "1 Embarcadero Center", "city": "San Francisco", "state": "CA", "default_country": "ES"}, "US"),
-    (line("1 Embarcadero Center, San Francisco, CA", default_country="NO"), "US"),
-    # the European rows the default is meant for
-    (line("Via Roma 10, Milano, MI", default_country="IT"), "IT"), (line("Via Roma 10, Milano MI", default_country="IT"), "IT"),
-    (line("Via Roma 10, 20121, Milano, MI", default_country="IT"), "IT"),
-    (line("Damrak 1, 1012 LG, Amsterdam, NH", default_country="NL"), "NL"),
-    (line("Calle Larios 1, 29005, Málaga, MA", default_country="ES"), "ES"),
-    (line("Unter den Linden 77, Berlin, DE", default_country="DE"), "DE"),
-    (line("1 Rue du Seyon, Neuchâtel, NE", default_country="CH"), "CH"), (line("10 Via Roma, Milano, MI", default_country="IT"), "IT"),
-    (line("1 Calle Larios, Málaga, MA", default_country="ES"), "ES"),
-    (line("1 Constitution Plaza, Hartford, CT", default_country="ES"), "US"),
-])
-def test_r4_24_us_street_without_zip_under_a_default(req, code):
-    assert route(**req) == code
-
-
 # [22]: the joined batch row 'street, postcode, town, province, country': the written country, after its postcode
 @pytest.mark.parametrize("text, code", [
     ("Via Roma 10, 20121, Milano, MI, IT", "IT"), ("Damrak 1, 1012 LG, Amsterdam, NH, NL", "NL"),
@@ -148,11 +71,6 @@ def test_r4_22_named_country_after_a_province(text, code):
     assert route(**line(text)) == code
 
 
-@pytest.mark.parametrize("default", ["CH", "NL", "ES", "DE"])
-def test_r4_22_named_country_beats_another_default(default):
-    assert route(**line("Via Roma 10, 20121, Milano, MI, IT", default_country=default)) == "IT"
-
-
 # [2]: a US town named like a country in the state cell, next to a US ZIP
 @pytest.mark.parametrize("req, code", [
     (cell("1 Main St", "Springfield", "Holland", "49423"), "US"), (cell("1 Main St", "Springfield", "Greece", "14612"), "US"),
@@ -161,9 +79,7 @@ def test_r4_22_named_country_beats_another_default(default):
     (cell("100 Broadway", "", "Wales", "53183"), "US"), (cell("100 Broadway", "", "Greece", "14612"), "US"),
     (cell("100 Broadway", "Rochester", "Greece", "14612"), "US"), (cell("100 Broadway", "", "Sweden", "11151"), "US"),
     # a European street and that country's postcode: the country
-    (cell("10 Rue de Rivoli", "Paris", "France", "75001"), "FR"), (cell("Ermou 10", "Athens", "Greece", "10563"), "GR"),
-    (cell("Drottninggatan 1", "Stockholm", "Sweden", "11151"), "SE"), (cell("Damrak 1", "Amsterdam", "Holland", "1012 LG"), "NL"),
-    (cell("ul. Marszałkowska 1", "Warszawa", "Poland", "00-001"), "PL"),
+    (cell("Damrak 1", "Amsterdam", "Holland", "1012 LG"), "NL"), (cell("ul. Marszałkowska 1", "Warszawa", "Poland", "00-001"), "PL"),
 ])
 def test_r4_2_country_like_town_in_the_state_cell(req, code):
     assert route(**req) == code
@@ -206,22 +122,6 @@ def test_r4_4_chinese_lines_are_not_japan(text):
 ])
 def test_r4_5_province_code_without_a_default(text, code):
     assert route(**line(text)) == code
-
-
-# [67]: Malta written English-style, number first
-@pytest.mark.parametrize("req, code", [
-    (line("12 Tower Road, Sliema, MT", default_country="MT"), "MT"),
-    (line("123 Republic Street, Valletta, MT", default_country="MT"), "MT"),
-    (cell("12 Tower Road", "Sliema", "MT", "SLM 1549", default_country="MT"), "MT"),
-    (cell("12 Tower Road", "Sliema", "MT", "", default_country="MT"), "MT"),
-    (line("12 Tower Road, Sliema SLM 1549, MT"), "MT"), (line("12 Tower Road, Sliema SLM1549 MT"), "MT"),
-    (line("123 Republic Street, Valletta VLT 1117, MT"), "MT"),
-    # Montana
-    (line("12 Tower Road, Sliema, MT"), "US"), (line("100 Main St, Ste 1234, Helena, MT"), "US"),
-    (line("1301 E 6th Ave, Helena, MT 59601", default_country="MT"), "US"),
-])
-def test_r4_67_malta_english_style(req, code):
-    assert route(**req) == code
 
 
 # R02 / R36: a Japanese town with a room or name after it, a postcode after a comma, a name first; Sapporo's 条

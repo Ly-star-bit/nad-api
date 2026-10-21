@@ -15,11 +15,9 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import config
-from .address import fix_zip, norm_unit, parse_oneline, parse_structured, prep, state_abbr
+from .address import parse_oneline
 from .intl import COUNTRIES, Ctx, JapanPost, country_in_text, country_name, known_country, supported, verify_intl
-from .intl.countries import (
-    crown_dependency, default_wins, postcode_in, structured_country, us_state_tail,
-)
+from .intl.countries import crown_dependency
 from .intl import INFO as INTL_INFO
 from .intl.core import PROBES as INTL_PROBES
 from .models import (
@@ -110,64 +108,25 @@ def _unsupported(value: str, code: str | None) -> HTTPException:
 
 
 def _country(req: VerifyRequest) -> str:
-    """The explicit country; else the one the address names (a US state + ZIP is the US); else the caller's
-    default; else the US."""
-    text = req.address or ", ".join(p for p in (req.street, req.city, req.state, req.zip) if p)
+    """`country` when given; else the one the address names (a US state + ZIP is the US, Japanese text is JP);
+    else the US."""
     if req.country and req.country.strip():
         code = known_country(req.country)
         if not supported(code):
             raise _unsupported(req.country.strip(), code)
-        return crown_dependency(code, text)
-    if req.address:
-        code = country_in_text(req.address)
-    else:
-        code = structured_country(req.street, req.city, req.state, req.zip)
-    raw_default = (req.default_country or "").strip()
-    default = known_country(raw_default) if raw_default else None
-    # a batch's own code or province after the town: "Berlin, DE" in a German batch, "Milano MI 20121" in an Italian one
-    own = bool(default) and (default_wins(default, req.address, code=code) if req.address
-                             else default_wins(default, text, req.state or "", req.zip, code=code))
-    if own and code != default:
-        code = None
-    if code is None and raw_default:
-        if not supported(default):
-            raise _unsupported(raw_default, default)
-        code = default
-        # a batch default doesn't take a line that ends with a US state ("..., Springfield, IL"), unless the line
-        # also has the default country's postcode ("Via Roma 10, 20121 Milano MI": MI is Milan's province)
-        if code != "US" and not own and us_state_tail(text) and not postcode_in(code, text):
-            code = "US"
+        return crown_dependency(code, req.address)
+    code = country_in_text(req.address)
     if code is not None and not supported(code):
         raise _unsupported(code, code)
-    return crown_dependency(code or "US", text)
+    return crown_dependency(code or "US", req.address)
 
 
 async def _run_verify(req: VerifyRequest) -> dict:
     country = _country(req)
     if country != "US":
-        return await verify_intl(
-            Ctx(app.state.upstream, app.state.overture), getattr(app.state, "japanpost", None), country,
-            address=req.address, street=req.street, city=req.city, postcode=req.zip, unit=req.unit, state=req.state,
-            overture_fallback=req.overture_fallback, max_candidates=req.max_candidates)
-    if req.address and not req.street:
-        pa = parse_oneline(req.address)
-        if req.unit:
-            pa.unit, pa.unit_raw = norm_unit(req.unit), prep(req.unit)
-        if req.city and not pa.city:
-            pa.city = prep(req.city)
-        if req.state and not pa.state:
-            pa.state = state_abbr(req.state) or prep(req.state).upper()
-        if req.zip and not pa.zip5:
-            pa.zip5, pa.zip4, warning = fix_zip(prep(req.zip), pa.state)
-            pa.warnings += [warning] if warning else []
-        structured = False
-    else:
-        pa = parse_structured(req.street or "", req.city or "", req.state or "", req.zip or "", req.unit or "")
-        structured = True
-    return await verify_address(
-        app.state.upstream, pa, overture=app.state.overture, lat=req.lat, lon=req.lon, structured=structured,
-        zip_fallback=req.zip_fallback, overture_fallback=req.overture_fallback, max_candidates=req.max_candidates,
-    )
+        return await verify_intl(Ctx(app.state.upstream, app.state.overture), getattr(app.state, "japanpost", None),
+                                 country, address=req.address)
+    return await verify_address(app.state.upstream, parse_oneline(req.address), overture=app.state.overture)
 
 
 # ------------------------------------------------------------------------------- routes
@@ -291,29 +250,12 @@ async def countries():
 
 @app.get("/v1/verify", response_model=VerifyResponse, tags=["verify"], summary="Verify one address (query string)")
 async def verify_get(
-    address: str | None = Query(None, max_length=300, description="One-line address", examples=["1700 W Washington St, Phoenix, AZ 85007"]),
-    street: str | None = Query(None, max_length=200, description="Street line (structured mode)"),
-    unit: str | None = Query(None, max_length=50),
-    city: str | None = Query(None, max_length=100),
-    state: str | None = Query(None, max_length=50, description="Abbreviation or full name"),
-    zip: str | None = Query(None, max_length=20, alias="zip", description="ZIP, or the postcode outside the US"),
-    country: str | None = Query(None, max_length=60, description="ISO code or name; default: named at the end of the "
-                                                                 "address, Japanese text -> JP, else US"),
-    default_country: str | None = Query(None, max_length=60, description="Used when neither `country` nor the "
-                                                                         "address names one (instead of the US)"),
-    lat: float | None = Query(None, ge=-90, le=90),
-    lon: float | None = Query(None, ge=-180, le=180),
-    zip_fallback: bool = Query(False),
-    overture_fallback: bool = Query(True, description="Retry against Overture Maps when NAD cannot confirm"),
-    max_candidates: int = Query(5, ge=1, le=50),
+    address: str = Query(..., min_length=1, max_length=300, description="One-line address",
+                         examples=["1700 W Washington St, Phoenix, AZ 85007"]),
+    country: str | None = Query(None, max_length=60, description="ISO code or name (US, DE, Japan, 德国). "
+                                                                 "Empty: read from the address, else US"),
 ):
-    try:
-        req = VerifyRequest(address=address, street=street, unit=unit, city=city, state=state, zip=zip,
-                            country=country, default_country=default_country, lat=lat, lon=lon, zip_fallback=zip_fallback,
-                            overture_fallback=overture_fallback, max_candidates=max_candidates)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    return await _run_verify(req)
+    return await _run_verify(VerifyRequest(address=address, country=country))
 
 
 @app.post("/v1/verify", response_model=VerifyResponse, tags=["verify"], summary="Verify one address (JSON body)")

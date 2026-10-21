@@ -15,7 +15,7 @@ from . import europe, japan, osm
 from .base import Ctx, Lookup, ProviderInfo, Skip, record
 from .countries import COUNTRIES
 from .match import decide, score, street_parts
-from .parse import IntlAddress, parse_line, parse_structured
+from .parse import IntlAddress, parse_line
 from .places import local_city
 
 PROVIDERS = {
@@ -85,42 +85,30 @@ def _base(country: str, raw: str) -> dict[str, Any]:
     }
 
 
-async def verify_intl(ctx: Ctx, jpost: japan.JapanPost | None, country: str, *, address: str | None = None,
-                      street: str | None = None, city: str | None = None, postcode: str | None = None,
-                      unit: str | None = None, state: str | None = None, overture_fallback: bool = True,
+async def verify_intl(ctx: Ctx, jpost: japan.JapanPost | None, country: str, *, address: str,
                       max_candidates: int = 5) -> dict[str, Any]:
     t0 = time.perf_counter()
     try:
         async with asyncio.timeout(config.INTL_TIMEOUT_S):
-            out = await _verify(ctx, jpost, country, address, street, city, postcode, unit, state, max_candidates)
+            out = await _verify(ctx, jpost, country, address, max_candidates)
     except TimeoutError:
-        out = _base(country, address or ", ".join(p for p in (street, unit, postcode, city) if p))
+        out = _base(country, address)
         out["status"] = "upstream_error"
         out["notes"].append(f"this country's sources gave no answer within {config.INTL_TIMEOUT_S:.0f} s")
     out["timing_ms"]["total"] = round((time.perf_counter() - t0) * 1000, 1)
     return out
 
 
-async def _verify(ctx: Ctx, jpost: japan.JapanPost | None, country: str, address: str | None, street: str | None,
-                  city: str | None, postcode: str | None, unit: str | None, state: str | None,
+async def _verify(ctx: Ctx, jpost: japan.JapanPost | None, country: str, address: str,
                   max_candidates: int) -> dict[str, Any]:
     if country == "JP":
-        # the prefecture, city and postcode fields only help pick the place: GSI is asked for the line itself
-        text = address or ", ".join(p for p in (street, unit, city) if p)
-        out = await _japan(ctx, jpost, text, state=state, postcode=postcode, city=city if address else None)
-    else:
-        c = COUNTRIES[country]
-        a = parse_line(address, c) if address and not street else parse_structured(c, street or "", city or "",
-                                                                                    postcode or "", unit or "")
-        if address and not street:  # extra structured fields fill what the line lacks
-            a.postcode = a.postcode or (postcode or "").strip().upper()
-            a.city = a.city or (city or "").strip()
-            a.unit = a.unit or (unit or "").strip()
-        if a.city and (local := local_city(a.city, country)) != a.city:  # "Vienna" is searched as Wien
-            a.warnings.append(f"town '{a.city}' read as {local}")
-            a.city = local
-        out = await _europe(ctx, a, c.providers, max_candidates)
-    return out
+        return await _japan(ctx, jpost, address)
+    c = COUNTRIES[country]
+    a = parse_line(address, c)
+    if a.city and (local := local_city(a.city, country)) != a.city:  # "Vienna" is searched as Wien
+        a.warnings.append(f"town '{a.city}' read as {local}")
+        a.city = local
+    return await _europe(ctx, a, c.providers, max_candidates)
 
 
 # how good an answer is, to keep the best when a later source is asked too
@@ -150,7 +138,7 @@ async def _europe(ctx: Ctx, a: IntlAddress, providers: tuple[str, ...], max_cand
     """Ask the country's sources in order. The next one is asked when a source is down or skips the address, when
     Overture has no data around it (Bavaria), or when an official register finds nothing at all - a spelling it
     can't read ('Mustamae tee' for Mustamäe tee) - in which case its answer still stands unless the next does better.
-    (`overture_fallback` is a US option: here Overture is a primary source, so only OVERTURE_ENABLED=0 drops it.)"""
+    (Here Overture is a primary source, so only OVERTURE_ENABLED=0 drops it.)"""
     out = _base(a.country, a.raw)
     line = (a.number, a.street) if COUNTRIES[a.country].number_first else (a.street, a.number)
     out["parsed"] = {"country": a.country, "state": None, "city": a.city or None, "zip": a.postcode or None,
@@ -256,14 +244,30 @@ def _apply(out: dict[str, Any], key: str, lk: Lookup, a: IntlAddress, max_candid
         d["notes"] = [n.replace(f" vs {INFO[key].name} ", " vs OpenStreetMap ", 1) if n.startswith("postcode differs")
                       else n for n in d["notes"]]
     out["notes"] += d["notes"]
+    if d["verified"]:
+        out["parsed"] = _record_split(out["parsed"], out["best_match"], COUNTRIES[a.country].number_first)
     return out
 
 
-async def _japan(ctx: Ctx, jpost: japan.JapanPost | None, text: str, **hints: str | None) -> dict[str, Any]:
+def _record_split(parsed: dict, rec: dict, number_first: bool) -> dict:
+    """A verified address split with the record's street ('unter den linden' -> Unter den Linden) and town, when the
+    record's town is the one written: Overture's town can be a district (Mitte for Berlin), and its postcode when the
+    one written differs. The number and a matching postcode stay as written: a record can drop the letter (Damrak 8
+    for 8-H) or the space (1012LG)."""
+    street, number, written = rec.get("street") or parsed.get("street"), parsed.get("house_number"), parsed.get("city")
+    city = rec.get("city") if rec.get("city") and (rec["match"].get("city_match") or not written) else written
+    line = (number, street) if number_first else (street, number)
+    zip_ = rec.get("zip") if rec.get("zip") and (rec["match"].get("zip_match") is False or not parsed.get("zip")) \
+        else parsed.get("zip")
+    return {**parsed, "city": city, "zip": zip_, "street": street,
+            "address1": " ".join(p for p in line if p) or parsed.get("address1"), "source": "record"}
+
+
+async def _japan(ctx: Ctx, jpost: japan.JapanPost | None, text: str) -> dict[str, Any]:
     out = _base("JP", text)
     out["provider"], out["data_source"] = _provider("jp_gsi"), "jp_gsi"
     try:
-        r = await japan.verify_jp(ctx, jpost, text, **hints)
+        r = await japan.verify_jp(ctx, jpost, text)
     except UpstreamError as exc:
         out["status"] = "upstream_error"
         out["data_source"] = None

@@ -31,7 +31,6 @@ NAD 查不到时用 **Overture Maps 地址数据** 兜底。**欧洲和日本**�
 Census 定位失败（新建街道常见，TIGER 里还没有）：
   有 ZIP → 在该 ZIP 范围内查 NAD（Add_Number=N 且街名含输入街名中最长的词）
   无 ZIP → 同样的查询，范围换成和城市（Census place / CDP）重叠的所有 ZIP
-  zip_fallback=true → 在 ZIP 范围内查该门牌的所有街道（旧行为）
 ```
 
 几处细节：
@@ -115,7 +114,7 @@ OpenAddresses 里各县/市的原始数据，正好补上这些空白。实测�
 
 按什么国家核对，依次看：
 
-1. 请求里的 `country`：ISO 代码（`DE`、`DEU`）、常见写法（`UK`、`U.S.A.`、`EL`）、国名（`Germany`、`德国`、`義大利`、`Ελλάδα`）
+1. 请求里填了 `country` 就按它：ISO 代码（`DE`、`DEU`）、常见写法（`UK`、`U.S.A.`、`EL`）、国名（`Germany`、`德国`、`義大利`、`Ελλάδα`）
    或 ERP 导出的组合写法（`美国(US)`、`Germany (DE)`、`DE - Germany`，两部分必须一致），美国属地（`PR`、`GU`、`Puerto Rico`）
    按美国；写成英国但邮编是 `JE` / `GY` / `IM` 的按泽西岛、根西岛、马恩岛；
 2. 地址里写的国家：末尾的国家名或单独一段的代码（`..., 10117 Berlin, Germany`、`..., London England`、`..., 75001 Paris, FR`、
@@ -123,16 +122,12 @@ OpenAddresses 里各县/市的原始数据，正好补上这些空白。实测�
    城市后面不加逗号的两字母代码不当国家（`50122 Firenze FI` 的 FI 是佛罗伦萨省，`3011 Bern BE` 的 BE 是伯尔尼州）；
    日文地址（假名、都道府県、丁目，或 `大阪市北区梅田3-1-1`、`京都市北区金閣寺町1` 这种市区 + 町名 + 番地写法，简体字
    `东京都`、`横滨市` 也算；`南京路1-1`、`科技园1-2-3` 这类中国地址不算），以及带 `-ku` / `chome` 的罗马字地址；
-3. 请求里的 `default_country`（批量页的“没写国家的行按”就是它）；但以美国州结尾的行（`..., Springfield, IL`）仍按美国，
-   除非行里同时有默认国家的邮编（`Via Roma 10, 20121 Milano MI` 的 MI 是米兰省）；默认国家是意大利时，
-   `Milano MI 20121` 这种“省份 + 邮编”只要邮编不可能是该州的 ZIP（密歇根是 480–499 开头）就按意大利；
-4. 都没有时按美国。
+3. 都没有时按美国。
 
-美国地址不会被误判：地址里只要有“州 + ZIP”（`AZ 85007`，也包括 `APO AE 09012`），就一定按美国（`default_country` 也改不了），
+美国地址不会被误判：地址里只要有“州 + ZIP”（`AZ 85007`，也包括 `APO AE 09012`），就按美国（除非请求里填了别的 `country`），
 后面的收件人名（John Holland）、中文备注（“放小区门口”）、片假名名字都不会改变国家；末尾的 `DE`、`MD`、`Rhode Island`、
 `Georgia` 是美国州，`Staten Island`、`New Britain`、`New Holland`、`Little Italy` 是美国地名；街道后面直接跟一个和国家同名的
-小镇（`270 S River Ave, Holland`、`300 N Coal St, Mexico`）也按美国。结构化请求只从街道行、州栏（`England`）和城市栏末尾
-（`Berlin, Germany`）读国家：城市栏整个是国名时当作美国小镇（Greece NY、Holland MI），单元栏从不读。
+小镇（`270 S River Ave, Holland`、`300 N Coal St, Mexico`）也按美国。
 地址写的是加拿大、澳大利亚、中国、俄罗斯等暂不支持的国家时返回 422（中英文说明），不会拿美国数据去“核实”。
 
 `GET /countries` 列出支持的国家和各自的数据源。返回结构和美国一样，另带 `country`、`provider`
@@ -243,19 +238,21 @@ docker build -t nad-api . && docker run -p 8000:8000 nad-api
   Census 定位点和同街最近的门牌（带门牌号），同街门牌、候选地址点一下就能复查（没有定位点时不显示“距定位点”列）。
   `/` 按 `Accept` 头区分：浏览器拿到页面，`curl` 等 API 客户端仍拿到原来的 JSON。
 - `http://<host>:8000/batch`：批量校验，一次最多 500 行。可以每行粘贴一个地址、从 Excel 复制多列，或上传 CSV
-  （表头 `address`，或 `street` / `unit` / `city` / `state` / `zip`，也认中文表头；UTF-8 / GBK 均可）。
+  （表头 `address`，或 `street` / `unit` / `city` / `state` / `zip`，也认中文表头；UTF-8 / GBK 均可）。分列的表在页面上
+  拼成一行地址再发送（`street unit, city, state zip`；街道、城市、州都是汉字/假名时按日文顺序 `〒zip 州城市街道 unit`），
+  `address` 列旁边的 `unit` 列插在第一个逗号前（`1700 W Washington St Apt 2, Phoenix, AZ 85007`）。
   订单导出里带前缀的列名（`Shipping Address 1`、`Ship City`、`收件人地址`、`收货城市` 等）也能识别。
   同时有买家地址和收货地址的导出（eBay 的 `Buyer Address 1` 和 `Ship To Address 1`）按收货地址。
   各国地址可以混在一起：有国家列时按它（`country`、`Ship Country`、`Destination Country`、`ISO`、`国家`、`目的国`、
-  `国家二字码`、繁体 `國家` 等都认；没有表头、也没选默认国家时，最后一列全是本服务支持的国家代码（`FR`、`NL`、`IT` 等）
-  才当国家列，而且只作为这一行的默认国家（`default_country`）发送：地址里写了美国州和 ZIP、或写了国家的，仍按地址本身；
-  `DE`、`MT`、`AL` 这类同时是美国州缩写的代码留在地址里由服务端判断；这一列其实是省份时，在页面上选默认国家即可关掉这个识别），
-  否则按地址里写的国家或日文识别，只有这两样都没有的行才按页面上选的默认国家（作为 `default_country` 发送）。某一格超过接口长度上限（地址 300 字等）的行直接标出，不发送，以免整批 20 行被拒。
+  `国家二字码`、繁体 `國家` 等都认，作为这一行的 `country` 发送；没有表头、也没在页面上选国家时，最后一列全是本服务支持的
+  国家代码（`FR`、`NL`、`IT` 等）才当国家列；`DE`、`MT`、`AL` 这类同时是美国州缩写的代码留在地址里由服务端判断；
+  这一列其实是省份时，在页面上选一个国家即可关掉这个识别）。没有国家列的行按页面上选的国家发送，选“自动识别”时不带
+  `country`，由服务端按地址里写的国家或日文识别。拼好的地址超过 300 字的行直接标出，不发送，以免整批 20 行被拒。
   页面按每批 20 条调用 `/v1/verify/batch?stream=true`，每条查完立刻显示（不用等同批最慢的那条），可停止、继续、
   重试失败行（服务明确拒绝的行，比如不支持的国家，不再重试）；地图按结论着色显示每一行（没有匹配记录时用定位点，
   官方登记没有定位点时用同街最近的门牌并注明），跟随筛选，点圆点看详情。
   导出 CSV 时原表的列原样保留，后面先追加每行拆分出的 `parsed_country`、`parsed_state`、`parsed_city`、`parsed_zip`、
-  `parsed_address1`（门牌 + 街道）、`parsed_address2`（单元），再追加 `verify_status`、`verify_verdict`、`verify_confidence`、`verify_matched_address`、
+  `parsed_address1`（门牌 + 街道）、`parsed_address2`（单元；已核实的行按核实到的记录拆分），再追加 `verify_status`、`verify_verdict`、`verify_confidence`、`verify_matched_address`、
   `verify_country`、`verify_nearest_number`（门牌不存在时同街最近的门牌）、`verify_census_matches`（Census 匹配到多个地址时的个数）、`verify_zip_should_be`（填的 ZIP 和记录不一致时，
   记录里的 ZIP；地址存在但 ZIP 填错会让包裹分错，结果行里也会标出来）、`verify_license` / `verify_attribution`
   （数据许可和需要标注的来源）等结果列。
@@ -279,13 +276,12 @@ docker build -t nad-api . && docker run -p 8000:8000 nad-api
 curl -G localhost:8000/v1/verify --data-urlencode "address=980 9th St Ste 1750, Sacramento, CA 95814"
 
 curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
-  -d '{"street":"11 W Washington St","unit":"Suite 240","city":"Phoenix","state":"AZ","zip":"85003"}'
+  -d '{"address":"Unter den Linden 77, 10117 Berlin","country":"DE"}'
 ```
 
-参数（长度上限：`address` 300、`street` 200 个字符，超出返回 422）：`address`（单行）或 `street`+`city`/`state`/`zip`（结构化）；可选 `country`（见[欧洲和日本](#欧洲和日本)，
-不支持的国家返回 422）、`default_country`（地址里没写国家时才用）、`unit`、`lat`+`lon`（跳过地理编码）、
-`zip_fallback`（Census 编码失败时在整个 ZIP 区域搜索该门牌的所有街道，较慢 3–20 s；不加时只查同名街道）、`overture_fallback`（默认 `true`，只影响美国地址：
-欧洲的 Overture 是主要数据源，不受它影响）、`max_candidates`。美国以外 `zip` 是邮编，日本的 `state` / `city` 用来确定都道府県和市区町村。
+参数只有两个：`address`（必填，一行完整地址，最长 300 个字符，超出返回 422）和 `country`（可选：ISO 代码或国名，
+见[欧洲和日本](#欧洲和日本)；填了就按它查，不支持的国家返回 422；不填时从地址里识别，识别不出按美国）。
+美国地址 NAD 查不到时总会用 Overture 补查，最多返回 5 个候选。
 
 返回要点：
 
@@ -298,10 +294,11 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
   "data_source": "nad",          // nad | overture | null —— 最终结论来自哪个数据集；美国以外是数据源代码（fr_ban、jp_gsi、osm …）
   "country": "US",               // 美国以外另带 "provider": {"name", "authority", "license", "attribution"}
   "nad_status": "verified",      // 仅 NAD 的结论（兜底前）
-  "parsed": {                    // 输入拆成的字段：地址 1 = 门牌 + 街道，地址 2 = 单元；日本 state / city 是都道府県 / 市区町村，
+  "parsed": {                    // 地址拆成的字段：地址 1 = 门牌 + 街道，地址 2 = 单元；日本 state / city 是都道府県 / 市区町村，
     "country": "US", "state": "CA", "city": "Sacramento", "zip": "95814",     // 地址 1 是町名 + 番地，地址 2 是建筑 / 房间
-    "address1": "980 9th St", "address2": "Ste 1750",
-    "house_number": "980", "street": "9th St", "unit": "Ste 1750"
+    "address1": "980 9th Street", "address2": "STE 1750",                       // 已核实（美国、欧洲）时按匹配到的记录拆分
+    "house_number": "980", "street": "9th Street", "unit": "STE 1750",       // （Phoen → Phoenix，W → West），并带
+    "source": "record"                                                          // "source": "record"；日本和未核实时是输入本身
   },
   "fallback": null,              // 触发兜底时：{"provider":"overture","release":"2026-09-23.1","triggered_by":"not_covered","status":"verified","adopted":true}
   "best_match": {                // NAD 官方记录（或 Overture 记录，结构相同，另带 license）
@@ -328,7 +325,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 
 ### `POST /v1/verify/batch`
 
-`{"addresses": [ {...VerifyRequest}, ... ]}`，单次最多 100 条，并发 5（可配）。返回每条结果 + `summary` 统计。
+`{"addresses": [{"address": "...", "country": "DE"}, ...]}`（每条和单条接口一样，`country` 可省略），单次最多 100 条，并发 5（可配）。返回每条结果 + `summary` 统计。
 
 加 `?stream=true` 时返回 `application/x-ndjson`：每查完一条输出一行 `{"index": i, "result": {...}}`（顺序按完成先后），
 客户端断开后剩下的地址不再查询。
@@ -406,7 +403,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 - **Census 会“纠正”方向**：例如把 `200 N Spring St` 匹配成 `200 S SPRING ST`。匹配时以用户输入的方向为准，并在 `notes` 中提示。
 - **NAD ≠ USPS 可投递**：`verified` 只说明物理地址点存在。需要可投递性请再接 USPS/CASS 类服务。
 - 单元号覆盖取决于数据提供方，很多地区只有楼栋点，因此有 `unit_not_found` 这一中间态。
-- 依赖 Census 地理编码定位；新建地址可能不在 TIGER 中 → 自动按 ZIP / 城市范围查同名街道（见[上文](#census-定位不到的地址)），也可以直接传 `lat`/`lon`。
+- 依赖 Census 地理编码定位；新建地址可能不在 TIGER 中 → 自动按 ZIP / 城市范围查同名街道（见[上文](#census-定位不到的地址)）。
 - 威斯康星网格门牌（`N95W18000 ...`）等特殊格式暂不解析。
 - 上游是公共免费服务，冷查询偶尔 5–15 s；生产环境建议保留缓存与限流。
 - 若需高并发/离线/SLA，仍建议按州下载 NAD 自建 PostGIS（可沿用本项目的解析与匹配逻辑）。

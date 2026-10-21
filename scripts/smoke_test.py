@@ -16,19 +16,18 @@ CASES = [
     ({"address": "350 5th Ave, New York, NY 10118"}, "verified", "nad"),
     ({"address": "980 9th St Ste 1750, Sacramento, CA 95814"}, "verified", "nad"),
     ({"address": "980 9th St Ste 9999, Sacramento, CA 95814"}, "unit_not_found", "nad"),
-    ({"street": "11 W Washington St", "unit": "Suite 240", "city": "Phoenix", "state": "AZ", "zip": "85003"}, "verified", "nad"),
+    ({"address": "11 W Washington St Suite 240, Phoenix, AZ 85003"}, "verified", "nad"),
     ({"address": "77 Fair Dr, Costa Mesa, CA 92626"}, "verified", "nad"),
     ({"address": "13600 W Lake View Rd, Raymond, NE 68428"}, "verified", "nad"),
     ({"address": "1716 W Washington St, Phoenix, AZ 85007"}, "street_only", "nad"),
     # Counties missing from NAD -> answered by the Overture fallback (county data via OpenAddresses)
     ({"address": "1600 Amphitheatre Pkwy, Mountain View, CA 94043"}, "verified", "overture"),
-    ({"address": "1600 Amphitheatre Pkwy, Mountain View, CA 94043", "overture_fallback": False}, "not_covered", "nad"),
     ({"address": "1 Civic Center Plaza, Irvine, CA 92606"}, "verified", "overture"),
     ({"address": "108 Bryant St Unit 32, Mountain View, CA 94041"}, "verified", "overture"),
     ({"address": "200 N Spring St, Los Angeles, CA 90012"}, "verified", "overture"),  # Census says S Spring
     ({"address": "1 Dr Carlton B Goodlett Pl, San Francisco, CA 94102"}, "verified", "overture"),
     ({"address": "123 Fakestreet Blvd, Phoenix AZ 85007"}, "geocode_failed", None),
-    ({"address": "106 Quivira Rd, Marquette, KS 67464", "zip_fallback": True}, "verified", "nad"),
+    ({"address": "106 Quivira Rd, Marquette, KS 67464"}, "verified", "nad"),
     ({"address": "asdkjh qwe zzz"}, "invalid_input", None),
 ]
 
@@ -77,9 +76,6 @@ REGRESSIONS = [
     ({"address": "1-2-3 Wakabayashi, Setagaya-ku, Tokyo 160-0023, Japan"}, "verified", "jp_gsi"),  # postcode of 西新宿
     ({"address": "本町1-1-1, 中央区, 大阪府"}, "verified", "jp_gsi"),  # not the first 本町 in Japan
     ({"address": "中央1-1-1", "country": "JP"}, "geocode_failed", "jp_gsi"),  # dozens of 中央 towns
-    # a US row without a state, a katakana name in the unit: still the US
-    ({"street": "1700 W Washington St", "unit": "タナカ様", "city": "Phoenix", "zip": "85007"}, "verified", "nad"),
-    ({"address": "1700 W Washington St, Phoenix, AZ 85007", "default_country": "JP"}, "verified", "nad"),  # state + ZIP win
     ({"address": "Unter den Linden 77, Berlin Germany"}, "verified", "overture"),  # the country after the town, no postcode
     ({"address": "京都市北区金閣寺町1"}, "verified", "jp_gsi"),  # Kyoto without the prefecture
 ]
@@ -95,7 +91,7 @@ with httpx.Client(timeout=90) as c:
         ok = r.status_code == 200 and d.get("status") == expected and d.get("data_source") == source
         failed += not ok
         best = (d.get("best_match") or {}).get("formatted", "")
-        label = (body.get("address") or body.get("street")) + ("" if body.get("overture_fallback", True) else " [no fallback]")
+        label = body["address"] + (f" [{body['country']}]" if body.get("country") else "")
         got = f"{d.get('status', r.status_code)}/{d.get('data_source')}"
         print(f"{'PASS' if ok else 'FAIL'} {ms:7.0f} ms  {got:<24} {label}  ->  {best}")
 print(f"\n{len(CASES) - failed}/{len(CASES)} passed")
