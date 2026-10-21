@@ -21,7 +21,8 @@ from .intl.countries import crown_dependency
 from .intl import INFO as INTL_INFO
 from .intl.core import PROBES as INTL_PROBES
 from .models import (
-    BatchItem, BatchRequest, BatchResponse, CountryInfo, VerifyRequest, VerifyResponse,
+    ADDRESS_DOC, COUNTRY_DOC, VERIFY_EXAMPLE, BatchItem, BatchRequest, BatchResponse, CountryInfo, ErrorDetail,
+    VerifyRequest, VerifyResponse,
 )
 from .overture import OvertureClient
 from .upstream import Upstream, UpstreamError
@@ -49,16 +50,14 @@ app = FastAPI(
     title="NAD Address Verification API",
     version="1.0.0",
     description=(
-        "Free US physical-address verification built on the USDOT **National Address Database** "
-        "(~98M authoritative address points, public domain) plus the US Census geocoder.\n\n"
-        "Pipeline: Census geocode → NAD spatial query (radius + house number) → local street/unit/ZIP "
-        "matching → county coverage check → **Overture Maps fallback** (NAD + OpenAddresses county/city "
-        "data on public S3, read with DuckDB) when NAD cannot confirm the address.\n\n"
-        "NAD confirms that an address physically exists; it does **not** confirm USPS deliverability.\n\n"
-        "**Europe and Japan** (`country`, or a country name at the end of the address): each country's official "
-        "address register where it has a free API (France BAN, Netherlands BAG, ...), the official registers that "
-        "Overture Maps republishes (Germany, Italy, ...), OpenStreetMap elsewhere, and 国土地理院 for Japan. "
-        "See `/countries`."
+        "核验地址是否真实存在（门牌、街道、单元），覆盖美国、欧洲和日本。\n\n"
+        "- **美国**：Census 地理编码定位 → 在 USDOT **National Address Database**（约 9800 万个官方地址点）里按位置和门牌"
+        "查找 → 本地比对街道、单元、ZIP、城市 → NAD 查不到时用 **Overture Maps** 补查。\n"
+        "- **欧洲**：各国官方地址登记（法国 BAN、荷兰 BAG 等），Overture 转载的官方数据（德国、意大利等），其余用 "
+        "OpenStreetMap。\n"
+        "- **日本**：国土地理院住所検索 + 日本郵便邮编表。\n\n"
+        "各国用哪些数据源见 `/countries`。核验的是地址点存在，**不是** USPS 能投递。\n\n"
+        "开启 API Key 时，`/v1/` 下的接口要带请求头 `X-API-Key`。"
     ),
     lifespan=lifespan,
 )
@@ -173,12 +172,12 @@ DEEP_EVERY_S = 60  # a deep check calls ~25 services (Photon, the national regis
 _deep: dict = {"at": 0.0, "body": {}, "lock": None}
 
 
-@app.get("/health", tags=["meta"])
-async def health(request: Request, deep: bool = Query(False, description="Call every upstream now (uncached) instead "
-                                                                         "of only reporting how each one's latest call "
-                                                                         "went; at most once a minute, needs the API key "
-                                                                         "when keys are set")):
-    """`upstreams` has the outcome of each upstream's latest real call; `status` is `degraded` when any failed."""
+@app.get("/health", tags=["meta"], summary="服务和上游状态")
+async def health(request: Request, deep: bool = Query(False, description="立即实际调用每个上游（不走缓存），而不只是报告"
+                                                                         "各自最近一次调用的结果；最多每分钟一次，开启 "
+                                                                         "API Key 时需要带 Key")):
+    """`upstreams` 是美国各上游最近一次实际调用的结果，`intl_upstreams` 是其他国家的；美国任一上游失败时 `status` 为
+    `degraded`。"""
     up: Upstream = app.state.upstream
     ov: OvertureClient | None = app.state.overture
     body: dict = {
@@ -233,10 +232,9 @@ async def health(request: Request, deep: bool = Query(False, description="Call e
 
 
 @app.get("/countries", tags=["meta"], response_model=list[CountryInfo],
-         summary="Countries that can be verified and their data sources")
+         summary="支持的国家和数据源")
 async def countries():
-    """`providers` in the order they are asked: the first that answers decides; the next only when it fails (or,
-    for Overture, has no data around the address)."""
+    """`providers` 按询问顺序排列：第一个回答的决定结论；它失败时（Overture 是在地址附近没有数据时）才问下一个。"""
     def prov(key: str) -> dict:
         p = INTL_INFO[key]
         return {"key": key, "name": p.name, "authority": p.authority, "license": p.license}
@@ -247,25 +245,52 @@ async def countries():
                    for c in sorted(COUNTRIES.values(), key=lambda c: (c.code != "JP", c.code))]
 
 
-@app.get("/v1/verify", response_model=VerifyResponse, tags=["verify"], summary="Verify one address (query string)")
+VERIFY_DOC = """核验一条地址。入参只有两个：
+
+- `address`（必填）：一行完整地址，最长 300 个字符
+- `country`（可选）：ISO 代码或国名；不填时从地址里识别，识别不出按美国
+
+返回里先看 `status`（结论）、`verified`（地址是否存在）、`confidence`（置信度），再看 `best_match`（匹配到的记录）、
+`parsed`（地址拆成的字段，已核实时按记录的写法）和 `notes`（结论的原因）。每个字段的说明见下方 Schema 里的
+VerifyResponse；下面 200 的示例是一个真实返回，值为 null 的字段在示例里省略了。
+
+地址不存在不是错误：照常返回 200，`status` 给出结论。只有请求本身有问题或服务出错时才返回下面的错误码。"""
+
+# The 422 detail comes in two shapes: FastAPI's list for a malformed request, a string for an unsupported country.
+ERRORS: dict = {
+    401: {"model": ErrorDetail, "description": "开启了 API Key，但请求头 `X-API-Key` 缺失或错误"},
+    422: {"model": ErrorDetail, "description": "参数不合法：`address` 为空或超过 300 字、`country` 超过 60 字（`detail` 是列表），"
+                                               "或 `country` 不在支持范围内（`detail` 是字符串，列出支持的国家）"},
+    429: {"model": ErrorDetail, "description": "超过每分钟请求数上限（默认 120 次 / 分钟 / IP），响应头 `Retry-After: 60`"},
+    502: {"model": ErrorDetail, "description": "上游服务异常（极少见：上游超时一般在 200 响应里以 "
+                                               "`status: upstream_error` 返回）"},
+}
+VERIFY_RESPONSES: dict = {200: {"content": {"application/json": {"example": VERIFY_EXAMPLE}}}, **ERRORS}
+
+
+@app.get("/v1/verify", response_model=VerifyResponse, tags=["verify"], summary="核验一条地址（查询参数）",
+         description=VERIFY_DOC, responses=VERIFY_RESPONSES)
 async def verify_get(
-    address: str = Query(..., min_length=1, max_length=300, description="One-line address",
+    address: str = Query(..., min_length=1, max_length=300, description=ADDRESS_DOC,
                          examples=["1700 W Washington St, Phoenix, AZ 85007"]),
-    country: str | None = Query(None, max_length=60, description="ISO code or name (US, DE, Japan, 德国). "
-                                                                 "Empty: read from the address, else US"),
+    country: str | None = Query(None, max_length=60, description=COUNTRY_DOC),
 ):
     return await _run_verify(VerifyRequest(address=address, country=country))
 
 
-@app.post("/v1/verify", response_model=VerifyResponse, tags=["verify"], summary="Verify one address (JSON body)")
+@app.post("/v1/verify", response_model=VerifyResponse, tags=["verify"], summary="核验一条地址（JSON 请求体）",
+          description=VERIFY_DOC, responses=VERIFY_RESPONSES)
 async def verify_post(req: VerifyRequest):
     return await _run_verify(req)
 
 
-@app.post("/v1/verify/batch", response_model=BatchResponse, tags=["verify"], summary="Verify many addresses")
+@app.post("/v1/verify/batch", response_model=BatchResponse, tags=["verify"], summary="批量核验",
+          responses={**ERRORS, 413: {"model": ErrorDetail, "description": "超过单次条数上限（默认 100）"}})
 async def verify_batch(body: BatchRequest, stream: bool = Query(
-        False, description="Stream one BatchItem per line (application/x-ndjson) as each address finishes, "
-                           "instead of one JSON document once all are done")):
+        False, description="每查完一条就输出一行 BatchItem（application/x-ndjson，按完成先后），而不是全部查完后"
+                           "返回一个 JSON")):
+    """每条的请求和返回都和单条接口相同，单次最多 100 条。一条失败（如不支持的国家）只在那条的 `error` 里说明，
+    不影响其他条。"""
     if len(body.addresses) > config.MAX_BATCH_SIZE:
         raise HTTPException(413, f"at most {config.MAX_BATCH_SIZE} addresses per batch")
     sem = asyncio.Semaphore(config.BATCH_CONCURRENCY)

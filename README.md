@@ -272,60 +272,188 @@ docker build -t nad-api . && docker run -p 8000:8000 nad-api
 
 ### `GET /v1/verify` / `POST /v1/verify`
 
+核验一条地址。GET 用查询参数，POST 用 JSON 请求体，两者参数和返回完全相同。启动后打开 `/docs` 可以直接试，
+每个字段的说明也在那里。
+
 ```bash
-curl -G localhost:8000/v1/verify --data-urlencode "address=980 9th St Ste 1750, Sacramento, CA 95814"
+curl -G localhost:8000/v1/verify --data-urlencode "address=1700 W Washington St, Phoen, AZ 85007"
 
 curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
   -d '{"address":"Unter den Linden 77, 10117 Berlin","country":"DE"}'
 ```
 
-参数只有两个：`address`（必填，一行完整地址，最长 300 个字符，超出返回 422）和 `country`（可选：ISO 代码或国名，
-见[欧洲和日本](#欧洲和日本)；填了就按它查，不支持的国家返回 422；不填时从地址里识别，识别不出按美国）。
-美国地址 NAD 查不到时总会用 Overture 补查，最多返回 5 个候选。
+#### 入参
 
-返回要点：
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `address` | 是 | 一行完整地址，1–300 个字符。美国按 `门牌 街道 单元, 城市, 州 ZIP`；欧洲按当地写法（`Unter den Linden 77, 10117 Berlin`）；日本按日文写法（`〒100-8914 東京都千代田区永田町1-6-1`） |
+| `country` | 否 | ISO 代码或国名（英文、本国文字或中文：`DE`、`Germany`、`Deutschland`、`德国`），最长 60 个字符。填了就按它查，不支持的国家返回 422。不填时从地址里识别：地址末尾写了国名（`..., 10117 Berlin, Germany`）按那个国家，日文地址按日本，都没有按美国。支持的国家见 `/countries` |
 
-```jsonc
+#### 返回
+
+地址不存在不算错误：照常返回 200，结论在 `status` 里。一般先看 `status`、`verified`、`confidence`，
+再看 `best_match`（匹配到的记录）、`parsed`（拆分好的地址）和 `notes`（为什么是这个结论）。
+
+一个真实的返回（输入城市拼错了，`parsed` 按记录改成了 Phoenix；`geocode`、`coverage`、`best_match` 有删节）：
+
+```json
 {
-  "status": "verified",          // 见下表
+  "status": "verified",
   "verified": true,
-  "match_level": "unit",         // unit | address | block（日本：只核实到番）| street | null
-  "confidence": 0.997,
-  "data_source": "nad",          // nad | overture | null —— 最终结论来自哪个数据集；美国以外是数据源代码（fr_ban、jp_gsi、osm …）
-  "country": "US",               // 美国以外另带 "provider": {"name", "authority", "license", "attribution"}
-  "nad_status": "verified",      // 仅 NAD 的结论（兜底前）
-  "parsed": {                    // 地址拆成的字段：地址 1 = 门牌 + 街道，地址 2 = 单元；日本 state / city 是都道府県 / 市区町村，
-    "country": "US", "state": "CA", "city": "Sacramento", "zip": "95814",     // 地址 1 是町名 + 番地，地址 2 是建筑 / 房间
-    "address1": "980 9th Street", "address2": "STE 1750",                       // 已核实（美国、欧洲）时按匹配到的记录拆分
-    "house_number": "980", "street": "9th Street", "unit": "STE 1750",       // （Phoen → Phoenix，W → West），并带
-    "source": "record"                                                          // "source": "record"；日本和未核实时是输入本身
+  "match_level": "address",
+  "confidence": 0.99,
+  "data_source": "nad",
+  "country": "US",
+  "provider": null,
+  "jp": null,
+  "nad_status": "verified",
+  "input": "1700 W Washington St, Phoen, AZ 85007",
+  "parsed": {
+    "country": "US", "state": "AZ", "city": "Phoenix", "zip": "85007",
+    "address1": "1700 West Washington Street", "address2": null,
+    "house_number": "1700", "street": "West Washington Street", "unit": null,
+    "source": "record"
   },
-  "fallback": null,              // 触发兜底时：{"provider":"overture","release":"2026-09-23.1","triggered_by":"not_covered","status":"verified","adopted":true}
-  "best_match": {                // NAD 官方记录（或 Overture 记录，结构相同，另带 license）
-    "uuid": "0a94ab67-b07b-46de-9d67-0717f9b42e59", "formatted": "980 9TH Street, STE 1750, SACRAMENTO, CA 95814",
-    "lat": 38.581349, "lon": -121.494763, "placement": "Unknown", "source": "Sacramento County CA", "updated": "2025-03-11",
-    "match": {"street_score": 1.0, "number_exact": true, "zip_match": true, "unit_match": true, "distance_m": 47.2}
+  "geocode": {"source": "census", "matched_address": "1700 W WASHINGTON ST, PHOENIX, AZ, 85007",
+              "lat": 33.448175, "lon": -112.098251, "county": "Maricopa", "county_fips": "04013", "match_count": 1},
+  "coverage": {"method": "point", "county": "Maricopa", "state": "AZ", "status_code": 10,
+               "status": "Data in the NAD", "in_nad": true, "data_date": "2025-07-09"},
+  "best_match": {
+    "uuid": "45c50721-75aa-40aa-85b4-2a505994d41d",
+    "formatted": "1700 West Washington Street, Phoenix, AZ 85007",
+    "address_number": "1700", "street": "West Washington Street",
+    "city": "Phoenix", "county": "Maricopa", "state": "AZ", "zip": "85007",
+    "lat": 33.448129, "lon": -112.096677, "source": "State of Arizona",
+    "match": {"score": 0.99, "street_score": 1.0, "number_exact": true, "zip_match": true,
+              "city_match": true, "unit_match": null, "distance_m": 146.1}
   },
-  "coverage": {"county": "Sacramento", "state": "CA", "status": "Data in the NAD", "in_nad": true},
-  "geocode": {"source": "census", "matched_address": "980 9TH ST, SACRAMENTO, CA, 95814", "county_fips": "06067"},
-  "suggestions": [], "notes": [], "timing_ms": {...}
+  "candidates": [{"formatted": "1700 West Washington Street, Phoenix, AZ 85007", "...": "..."}],
+  "suggestions": [],
+  "fallback": null,
+  "search_radius_m": 300,
+  "nad_points_nearby": null,
+  "notes": [],
+  "disclaimer": "NAD / Overture confirm that an address point physically exists ...",
+  "timing_ms": {"geocode": 664.5, "coverage": 509.7, "nad": 838.8, "total": 1504.1}
 }
 ```
+
+**顶层字段**
+
+| 字段 | 说明 |
+|---|---|
+| `status` | 结论，见下面的 status 表 |
+| `verified` | 地址存在：`status` 是 `verified` 或 `unit_not_found` 时为 `true` |
+| `match_level` | 核实到哪一级：`unit` 单元、`address` 门牌、`block` 只到番（日本，数据里没有号）、`street` 只有街道；没有匹配时为 `null` |
+| `confidence` | 置信度 0–1，见下面的说明 |
+| `data_source` | 最终结论来自哪个数据集：美国是 `nad` 或 `overture`；美国以外是数据源代码（`fr_ban`、`nl_pdok`、`jp_gsi`、`overture`、`osm` 等）；`upstream_error` 时为 `null` |
+| `country` | 按哪个国家核验的（ISO 代码） |
+| `provider` | 美国以外：回答的数据源 `{key, name, authority, url, license, attribution}`。`authority` 是 `official`（官方登记）、`overture` 或 `osm`（社区数据：查到是证据，查不到不能说明地址不存在）；展示数据时要标注 `attribution`。美国为 `null` |
+| `jp` | 日本：`parcel` 是番地式地址（不是丁目-番-号），`go_given` 是输入在番后面写了号或枝番。其他国家为 `null` |
+| `nad_status` | 美国：只看 NAD 的结论（Overture 补查前）。美国以外为 `null` |
+| `input` | 请求里的 `address` 原文 |
+| `parsed` | 地址拆成的字段，见下面的说明 |
+| `geocode` | 定位结果，见下面的说明；没有定位时为 `null` |
+| `coverage` | 美国：NAD 在这个县有没有数据 `{method, partial, county, state, state_name, status_code, status, in_nad, data_date}`，`in_nad` 为 `false` 时 NAD 查不到不说明地址有问题。美国以外为 `null` |
+| `best_match` | 匹配到的记录，见下面的说明；没有匹配时为 `null` |
+| `candidates` | 搜索范围内同门牌号的记录，按匹配分排序，最多 5 条（美国包含 `best_match` 本身，例如同一栋楼的其他单元） |
+| `suggestions` | `street_only` 时：同一条街上和输入最接近的门牌，最多 5 条，结构同 `best_match` |
+| `fallback` | 第一个数据源没给出答案、改问下一个时的记录 `{provider, release, triggered_by, status, adopted, error}`：`triggered_by` 是为什么补查，`status` 是补查数据源自己的结论，`adopted` 为 `true` 表示最终结论用的是补查结果。没有补查时为 `null` |
+| `search_radius_m` | 美国：NAD 最后一次按定位点搜索的半径（米） |
+| `nad_points_nearby` | 美国：定位点附近 NAD 的地址点数，查过同街门牌时才有 |
+| `notes` | 说明（英文）：为什么是这个结论、哪些项不一致、补查情况等 |
+| `disclaimer` | 固定说明：核验的是地址点存在，不是 USPS 能投递 |
+| `timing_ms` | 各步耗时（毫秒），`total` 是总耗时 |
+
+**`parsed`**：地址拆成的字段。已核实（美国、欧洲）时按匹配到的记录拆分，拼错的城市、缩写的街道改成记录里的写法
+（`Phoen` → `Phoenix`，`W Washington St` → `West Washington Street`），并带 `"source": "record"`；其他情况按输入拆分，
+`source` 为 `null`。欧洲的门牌号和邮编保留输入的写法（记录可能省掉 `8-H` 的字母、`1012 LG` 的空格），只有输入的邮编和记录
+不一致时才换成记录的；记录里的城市是区名（Berlin 的 Mitte）时保留输入的城市。
+
+| 字段 | 说明 |
+|---|---|
+| `country` | ISO 代码 |
+| `state` | 州 / 省（日本：都道府県） |
+| `city` | 城市（日本：市区町村） |
+| `zip` | 邮编 |
+| `address1` | 地址 1：门牌 + 街道，按当地顺序（日本：町名 + 番地） |
+| `address2` | 地址 2：单元、楼层、房间（日本：建筑名、房间号） |
+| `house_number` / `street` / `unit` | 门牌号 / 街道 / 单元（`unit` 和 `address2` 相同） |
+| `source` | `record`：按匹配到的记录拆分；`null`：按输入拆分 |
+
+**`best_match`**（`candidates`、`suggestions` 的每一项结构相同）：一条地址记录。美国以外各数据源的记录也套用这个结构，
+没有的字段为 `null` 或空对象。
+
+| 字段 | 说明 |
+|---|---|
+| `uuid` | 记录在数据源里的 ID |
+| `formatted` | 整条地址，按数据源的写法 |
+| `address_number` / `street` | 门牌号 / 街道全名（日本：番或番-号 / 町名 + 丁目） |
+| `street_parts` | NAD 的街道分段：`pre_directional`（West）、`name`（Washington）、`post_type`（Street）等；美国以外为空 |
+| `subaddress` | 单元：`building`、`floor`、`unit`、`room`，以及原文 `subaddress` |
+| `city` / `county` / `state` / `zip` | 城市 / 县（仅美国）/ 州或地区代码 / 邮编 |
+| `lat` / `lon` | 坐标 |
+| `placement` / `address_class` / `updated` | NAD 的坐标放置方式、地址类别；记录更新日期 |
+| `source` | 提供这条记录的机构：NAD 是提交数据的州 / 县；Overture 记录是 `overture:<数据集>`；日本是 `国土地理院` |
+| `license` | 数据许可（Overture 和美国以外的记录） |
+| `match` | 和输入逐项比对的结果，见下表 |
+
+美国记录还带着 NAD 的原始字段：`address_number_int`、`address_number_prefix`、`address_number_suffix`、
+`postal_city`（邮政城市名）、`municipality`、`zip4`、`landmark`、`address_type`、`lifecycle`、`delivery_type`、
+`address_authority`（地址主管机构）。
+
+| `match` 字段 | 说明（`null` 表示无法比较：输入或记录缺这一项，或数据源不提供） |
+|---|---|
+| `score` | 综合匹配分 0–1。美国 = 0.55 × 街道 + 0.15 × 门牌 + 0.10 × ZIP + 0.10 × 单元 + 0.10 × 距离 |
+| `street_score` | 街道名相似度 0–1（缩写、方向词已归一化：W = West，St = Street）；≥ 0.8 才算同一条街 |
+| `number_exact` | 门牌号（含后缀，如 12B）完全一致；日本数据只到番时为 `null` |
+| `zip_match` | 邮编一致（美国比前 5 位） |
+| `city_match` | 城市一致；美国以外记录的城市常是区名，比不了时为 `null` |
+| `unit_match` | 单元一致；输入没写单元时为 `null` |
+| `distance_m` | 记录离定位点的距离（米）；没有定位点（按 ZIP / 城市范围查、日本）时为 `null` |
+
+**`confidence`**：就是 `best_match.match.score`，再按情况打折：美国 NAD 查不到、用 Overture 补查到的 × 0.9；单元没找到 × 0.9；门牌后缀不同 × 0.85（美国）。美国以外还有：邮编和记录不一致 × 0.9、地址里没写城市和邮编 × 0.9、门牌落在记录的号段内（12 在 10-14 里）× 0.95、这个门牌只有带附加号的记录（Damrak 8 只有 8-A、8-B）× 0.9。`street_only` 固定 0.3，`not_found` 为 0.05，其余没有匹配的结论为 0。日本：到号 0.95、到番 0.7、只到町 0.3，邮编不一致再 × 0.9。打折的原因都写在 `notes` 里。
+
+**`geocode`**：按 `source` 有几种结构。
+
+| `source` | 什么时候 | 字段 |
+|---|---|---|
+| `census` | 美国，Census 定位到了 | `lat`、`lon`、`matched_address`、`components`（Census 拆出的街道分段）、`county`、`county_fips`、`state`、`zip`、`tiger_line_id`、`match_count`；匹配到多个地址时另有 `alternatives`，只核验了第一个 |
+| `zcta` | 美国，Census 定位不到，按 ZIP 范围查 | `zip`、`extent`（范围的经纬度框） |
+| `city` | 美国，没有 ZIP，按城市范围查 | `city`、`state`、`zips`、`extent` |
+| `photon` 等 | 欧洲 | `lat`、`lon`、`matched_address`、`level` |
+| `gsi` | 日本 | `lat`、`lon`、`matched_address` |
+
+**`status`**
 
 | status | 含义 |
 |---|---|
 | `verified` | 门牌 + 街道（+ 单元）存在（看 `data_source` 是 NAD 还是 Overture） |
-| `unit_not_found` | 楼栋存在，但该单元没有记录（很多数据源不录单元，`notes` 会列出已有单元） |
+| `unit_not_found` | 楼栋存在，但该单元没有记录（很多数据源不录单元，`notes` 会列出已有单元）；`verified` 仍为 `true` |
 | `street_only` | 附近有这条街，但没有这个门牌；`suggestions` 给出同街最接近的门牌 |
 | `not_found` | 该地区有数据覆盖，但无匹配 —— 较大概率是错误/虚构地址 |
 | `not_covered` | NAD 和 Overture 在该地区都没有数据，无法判断（美国以外还包括：OSM 没收录门牌、地址没有门牌号、没写城市而同名地址有多处） |
 | `geocode_failed` | Census 找不到这个地址（或拒绝了输入），而且无法按 ZIP / 城市范围查，或者查了但 NAD 里也没有这条街（可能是新地址或街名写错） |
 | `invalid_input` | 解析不出门牌号（PO Box、邮政信箱、自提柜也在此列，`notes` 会说明） |
-| `upstream_error` | 免费上游超时/故障，包括连不上 Census 地理编码 —— 这种情况不代表地址有问题 |
+| `upstream_error` | 免费上游超时/故障，包括连不上 Census 地理编码 —— 这种情况不代表地址有问题，可以重试 |
+
+#### 错误码
+
+错误时返回 `{"detail": ...}`。
+
+| 状态码 | 什么时候 |
+|---|---|
+| 401 | 设置了 `NAD_API_KEYS`，但请求头 `X-API-Key` 缺失或错误 |
+| 422 | 参数不合法。两种形式：`address` 为空或超过 300 字、`country` 超过 60 字时 `detail` 是列表（每项的 `loc` 指出哪个参数、`msg` 是原因）；`country` 不在支持范围内时 `detail` 是字符串，列出支持的国家 |
+| 429 | 超过每分钟请求数上限（`NAD_RATE_LIMIT_PER_MIN`，默认 120 次 / 分钟 / IP），响应头带 `Retry-After: 60` |
+| 502 | 上游服务异常。很少见：上游超时一般在 200 响应里以 `status: upstream_error` 返回 |
 
 ### `POST /v1/verify/batch`
 
-`{"addresses": [{"address": "...", "country": "DE"}, ...]}`（每条和单条接口一样，`country` 可省略），单次最多 100 条，并发 5（可配）。返回每条结果 + `summary` 统计。
+`{"addresses": [{"address": "...", "country": "DE"}, ...]}`（每条的入参和返回都和单条接口一样，`country` 可省略），单次最多 100 条（超出返回 413），并发 5（可配）。
+返回 `{"count": n, "summary": {"verified": 3, ...}, "results": [{"index": 0, "result": {...}, "error": null}, ...]}`：
+`index` 是这条在请求里的位置，`summary` 是每种 `status` 的条数；一条失败（如不支持的国家）时那条 `result` 为 `null`、
+`error` 说明原因，计入 `summary` 的 `error`，不影响其他条。
 
 加 `?stream=true` 时返回 `application/x-ndjson`：每查完一条输出一行 `{"index": i, "result": {...}}`（顺序按完成先后），
 客户端断开后剩下的地址不再查询。

@@ -79,9 +79,9 @@ def _provider(key: str) -> dict:
 def _base(country: str, raw: str) -> dict[str, Any]:
     return {
         "status": None, "verified": False, "match_level": None, "confidence": 0.0, "data_source": None,
-        "nad_status": None, "country": country, "provider": None, "input": raw, "parsed": {}, "geocode": None,
-        "coverage": None, "best_match": None, "candidates": [], "suggestions": [], "fallback": None, "notes": [],
-        "disclaimer": DISCLAIMER, "timing_ms": {},
+        "nad_status": None, "country": country, "provider": None, "input": raw, "parsed": {"country": country},
+        "geocode": None, "coverage": None, "best_match": None, "candidates": [], "suggestions": [], "fallback": None,
+        "notes": [], "disclaimer": DISCLAIMER, "timing_ms": {},
     }
 
 
