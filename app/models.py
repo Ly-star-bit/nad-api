@@ -156,21 +156,3 @@ class BatchResponse(BaseModel):
     count: int
     summary: dict[str, int]
     results: list[BatchItem]
-
-
-class NearResponse(BaseModel):
-    lat: float
-    lon: float
-    radius_m: float
-    count: int
-    truncated: bool
-    results: list[NadRecord]
-
-
-class OvertureNearResponse(NearResponse):
-    release: str
-
-
-class CoverageResponse(BaseModel):
-    query: dict
-    coverage: Coverage | None

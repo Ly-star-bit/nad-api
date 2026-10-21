@@ -21,12 +21,11 @@ from .intl.countries import crown_dependency
 from .intl import INFO as INTL_INFO
 from .intl.core import PROBES as INTL_PROBES
 from .models import (
-    BatchItem, BatchRequest, BatchResponse, CountryInfo, CoverageResponse, NearResponse, OvertureNearResponse,
-    VerifyRequest, VerifyResponse,
+    BatchItem, BatchRequest, BatchResponse, CountryInfo, VerifyRequest, VerifyResponse,
 )
 from .overture import OvertureClient
 from .upstream import Upstream, UpstreamError
-from .verify import bbox_around, haversine_m, verify_address
+from .verify import verify_address
 
 
 @asynccontextmanager
@@ -160,7 +159,7 @@ async def root(request: Request):
     return {
         "service": app.title,
         "docs": "/docs",
-        "endpoints": ["/v1/verify", "/v1/verify/batch", "/v1/nad/near", "/v1/nad/coverage", "/countries", "/health"],
+        "endpoints": ["/v1/verify", "/v1/verify/batch", "/countries", "/health"],
     }
 
 
@@ -294,64 +293,3 @@ async def verify_batch(body: BatchRequest, stream: bool = Query(
     items = await asyncio.gather(*(one(i, r) for i, r in enumerate(body.addresses)))
     summary = Counter(it.result.status if it.result else "error" for it in items)
     return BatchResponse(count=len(items), summary=dict(summary), results=list(items))
-
-
-@app.get("/v1/nad/near", response_model=NearResponse, tags=["nad"], summary="NAD address points near a coordinate")
-async def nad_near(
-    lat: float = Query(..., ge=-90, le=90),
-    lon: float = Query(..., ge=-180, le=180),
-    radius: float = Query(100, gt=0, description="meters (capped by NAD_MAX_NEAR_RADIUS_M, default 1500)"),
-    limit: int = Query(20, ge=1, le=2000),
-    number: int | None = Query(None, description="Only points with this house number (Add_Number)"),
-):
-    radius = min(radius, config.MAX_NEAR_RADIUS_M)
-    where = f"Add_Number = {int(number)}" if number is not None else "1=1"
-    recs, truncated = await app.state.upstream.nad_near(lat, lon, radius, where=where)
-    for r in recs:
-        r["distance_m"] = (
-            round(haversine_m(lat, lon, r["lat"], r["lon"]), 1) if r.get("lat") is not None and r.get("lon") is not None else None
-        )
-    recs.sort(key=lambda r: r["distance_m"] if r["distance_m"] is not None else 1e9)
-    return {"lat": lat, "lon": lon, "radius_m": radius, "count": len(recs[:limit]),
-            "truncated": truncated or len(recs) > limit, "results": recs[:limit]}
-
-
-@app.get("/v1/nad/coverage", response_model=CoverageResponse, tags=["nad"], summary="Is a county covered by the NAD?")
-async def nad_coverage(
-    lat: float | None = Query(None, ge=-90, le=90),
-    lon: float | None = Query(None, ge=-180, le=180),
-    state: str | None = Query(None, min_length=2, max_length=2, description="State abbreviation, with county"),
-    county: str | None = Query(None, description="County name without 'County', e.g. Maricopa"),
-):
-    up: Upstream = app.state.upstream
-    if state and county:
-        return {"query": {"state": state.upper(), "county": county}, "coverage": await up.county_status_by_name(county, state)}
-    if lat is None or lon is None:
-        raise HTTPException(422, "give lat+lon, or state+county")
-    cov = await up.resolve_coverage(lat, lon)
-    return {"query": {"lat": lat, "lon": lon}, "coverage": cov}
-
-
-@app.get("/v1/overture/near", response_model=OvertureNearResponse, tags=["overture"],
-         summary="Overture Maps address points near a coordinate")
-async def overture_near(
-    lat: float = Query(..., ge=-90, le=90),
-    lon: float = Query(..., ge=-180, le=180),
-    radius: float = Query(100, gt=0, description="meters (capped by NAD_MAX_NEAR_RADIUS_M, default 1500)"),
-    limit: int = Query(20, ge=1, le=2000),
-    number: int | None = Query(None, description="Only points whose house number is this integer"),
-):
-    ov: OvertureClient | None = app.state.overture
-    if ov is None:
-        raise HTTPException(503, "Overture fallback is disabled (OVERTURE_ENABLED=0)")
-    radius = min(radius, config.MAX_NEAR_RADIUS_M)
-    recs = await ov.query(bbox_around(lat, lon, radius), number=number)
-    if number is not None:
-        recs = [r for r in recs if r["address_number_int"] == number]
-    # copies: the records are the cached ones other requests get too, so they must not carry this request's distance
-    recs = [{**r, "distance_m": round(haversine_m(lat, lon, r["lat"], r["lon"]), 1) if r.get("lat") is not None else None}
-            for r in recs]
-    recs = sorted((r for r in recs if r["distance_m"] is None or r["distance_m"] <= radius),
-                  key=lambda r: r["distance_m"] if r["distance_m"] is not None else 1e9)
-    return {"lat": lat, "lon": lon, "radius_m": radius, "count": len(recs[:limit]), "truncated": len(recs) > limit,
-            "release": await ov.release(), "results": recs[:limit]}

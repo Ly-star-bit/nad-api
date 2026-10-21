@@ -334,19 +334,6 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 
 支持的国家（中文名）和各自按顺序使用的数据源。
 
-### `GET /v1/nad/near?lat=&lon=&radius=100&limit=20&number=`
-
-逆地理：返回坐标附近的 NAD 地址点（按距离排序），半径上限 1500 m。
-
-### `GET /v1/overture/near?lat=&lon=&radius=100&limit=20&number=`
-
-同上，但查 Overture（返回 `release`、每条记录的 `source` / `license`）。
-
-### `GET /v1/nad/coverage?lat=&lon=` 或 `?state=CA&county=Orange`
-
-县参与状态。注意该图层同时含“整县”和“城市级”多边形（如 Orange County 整体无数据，但 Costa Mesa 有），
-因此按点查询时取最小的包含多边形；点查询失败（如纽约县）时退回按县名查询。
-
 ### `GET /health` / `GET /health?deep=true`
 
 `upstreams` 列出每个上游（`census_geocoder`、`nad`、`nad_coverage`、`tigerweb`、`overture`）最近一次真实调用是否成功、
@@ -398,6 +385,8 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 
 - **覆盖不全**：NAD 依赖各州/县自愿提交，约 600 个县显示 “No statewide data”（如加州大部分县）。
   Overture 兜底能补上很大一部分，但仍有两边都没数据的地区（返回 `not_covered`）。
+  县参与状态图层同时含“整县”和“城市级”多边形（如 Orange County 整体无数据，但 Costa Mesa 有），
+  因此按点查询时取最小的包含多边形；点查询失败（如纽约县）时退回按县名查询。
 - **Overture 不是权威源**：它是汇总数据，`confidence` 已打 9 折；`source=overture:NAD` 的记录用的 NAD 版本未公开，
   可能与官方 r23 服务不一致，属正常现象。坐标为 float32（约 1 m 精度）。
 - **Census 会“纠正”方向**：例如把 `200 N Spring St` 匹配成 `200 S SPRING ST`。匹配时以用户输入的方向为准，并在 `notes` 中提示。

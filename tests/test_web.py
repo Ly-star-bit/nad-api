@@ -65,26 +65,3 @@ def test_oversized_input_is_rejected():
     assert r.status_code == 422
     r = client.get("/v1/verify", params={"address": "1 " + "x" * 5000})
     assert r.status_code == 422
-
-
-def test_overture_near_leaves_cached_records_alone():
-    from app.overture import overture_record
-
-    cached = [overture_record({"id": "x", "number": "1", "street": "A ST", "postcode": "94043", "lat": 37.0, "lon": -122.0,
-                               "address_levels": [{"value": "CA"}], "dataset": "test"})]
-
-    class Ov:
-        async def query(self, bbox, number=None, limit=5000, timeout=None):
-            return cached
-
-        async def release(self):
-            return "2026-09-23.1"
-
-    app.state.overture = Ov()
-    try:
-        a = client.get("/v1/overture/near", params={"lat": 37.0, "lon": -122.0, "radius": 1000}).json()
-        b = client.get("/v1/overture/near", params={"lat": 37.001, "lon": -122.0, "radius": 1000}).json()
-    finally:
-        app.state.overture = None
-    assert a["results"][0]["distance_m"] == 0.0 and b["results"][0]["distance_m"] > 100
-    assert "distance_m" not in cached[0]

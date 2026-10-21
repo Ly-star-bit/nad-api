@@ -121,7 +121,6 @@ HTTP_TIMEOUT = _env_float("NAD_HTTP_TIMEOUT", 25.0)
 # Search radii (meters) around the geocoded point; the second is only used when the first finds nothing.
 SEARCH_RADII_M = tuple(int(x) for x in os.getenv("NAD_SEARCH_RADII_M", "300,1500").split(","))
 STREET_MATCH_THRESHOLD = _env_float("NAD_STREET_MATCH_THRESHOLD", 0.8)
-MAX_NEAR_RADIUS_M = _env_int("NAD_MAX_NEAR_RADIUS_M", 1500)
 MAX_BATCH_SIZE = _env_int("NAD_MAX_BATCH_SIZE", 100)
 BATCH_CONCURRENCY = _env_int("NAD_BATCH_CONCURRENCY", 5)
 
