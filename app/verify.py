@@ -506,6 +506,8 @@ async def verify_address(
     # ---- 2. NAD -----------------------------------------------------------------------
     overture_area = True  # whether `extent` is small enough for the Overture fallback
     street_unknown = False  # an area search found no street of that name: not_found would overstate it
+    # notes that a business listed at the address (step 4) proves wrong, and what they say then
+    if_listed: dict[str, str] = {}
     if geocode is not None:
         out["geocode"] = geocode
         origin = (geocode["lat"], geocode["lon"])
@@ -560,8 +562,9 @@ async def verify_address(
                 elif on_street is not None:
                     street_unknown = True
                     dated = f" (data as of {coverage['data_date']})" if (coverage or {}).get("data_date") else ""
-                    empty_note = (f"neither Census nor NAD{dated} has a street named like '{pa.street_text}' in {where}: "
-                                  "the address may be newer than the data, or the street name may be misspelled")
+                    no_street = f"neither Census nor NAD{dated} has a street named like '{pa.street_text}' in {where}"
+                    empty_note = f"{no_street}: the address may be newer than the data, or the street name may be misspelled"
+                    if_listed[empty_note] = f"{no_street}, likely because the street is newer than the data"
             nad_dec = decide(pa, scored, suggestions, dataset="NAD", ref_zip=ref_zip, max_candidates=max_candidates,
                              coverage=coverage, empty_note=empty_note)
         except UpstreamError as exc:
@@ -605,9 +608,11 @@ async def verify_address(
                 src = (ov_dec.best_match or {}).get("source")
                 ov_dec.notes.insert(0, f"NAD result was '{nad_dec.status}'; answered from Overture Maps {info['release']}"
                                        + (f" ({src})" if src else ""))
+                if_listed[ov_dec.notes[0]] = f"Overture fallback ({info['release']}) returned '{ov_dec.status}'"
                 apply(ov_dec, "overture")
             else:
                 notes.append(f"Overture fallback ({info['release']}) returned '{ov_dec.status}'; kept the NAD result")
+                if_listed[notes[-1]] = f"Overture fallback ({info['release']}) returned '{ov_dec.status}'"
         timings["overture"] = round((time.perf_counter() - t) * 1000, 1)
 
         # ---- 4. Overture places: a business listed at this address. New industrial parks and warehouses are
@@ -634,6 +639,7 @@ async def verify_address(
                                            f"Maps {info['release']} places: '{bm['place']['name']}'"
                                            + (f" ({src})" if src else "") + " is listed at it, which shows a business "
                                            "uses the address, not that an addressing authority recorded it")
+                    notes[:] = [if_listed.get(n, n) for n in notes]
                     apply(pl_dec, "overture_places")
                 else:
                     notes.append(f"Overture places ({info['release']}) has no business listed at this address either")

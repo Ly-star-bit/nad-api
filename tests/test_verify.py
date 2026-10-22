@@ -163,11 +163,11 @@ def test_street_missing_everywhere_is_unknown_not_absent():
     assert up.wheres[-1] == "St_Name LIKE '%NOSUCH%'"  # asked whether the street itself is there
 
 
-def _place(freeform, name="Walmart"):
+def _place(freeform, name="Walmart", **row):
     from app.overture import place_record
     return place_record({"id": "p1", "name": name, "freeform": freeform, "locality": "Shippensburg",
                          "postcode": "17257-9552", "region": "PA", "category": "shopping", "confidence": 0.92,
-                         "operating_status": "open", "lon": -77.5274, "lat": 40.0150, "dataset": "meta"})
+                         "operating_status": "open", "lon": -77.5274, "lat": 40.0150, "dataset": "meta", **row})
 
 
 def test_business_listed_at_the_address_verifies_it():
@@ -181,6 +181,11 @@ def test_business_listed_at_the_address_verifies_it():
         assert r["fallback"]["places"]["adopted"] and r["fallback"]["places"]["status"] == "verified"
         assert r["parsed"]["source"] == "record" and r["parsed"]["city"] == "Shippensburg"
         assert any("'Walmart' (meta) is listed at it" in n for n in r["notes"])
+        # what the earlier steps said before the listing turned up no longer holds
+        assert any("United Dr' in " in n and n.endswith("likely because the street is newer than the data")
+                   for n in r["notes"])
+        assert not any("misspelled" in n or "kept the NAD result" in n for n in r["notes"])
+        assert "Overture fallback (2026-09-23.1) returned 'not_found'" in r["notes"]
 
 
 def test_business_on_another_street_or_number_proves_nothing():
@@ -251,6 +256,36 @@ def test_overture_miss_over_an_area_keeps_not_covered():
     # no business listed there either: a places miss says nothing about the address
     assert ov.themes == ["addresses", "places"] and r["fallback"]["places"]["status"] == "not_found"
     assert not r["fallback"]["places"]["adopted"] and r["data_source"] == "nad"
+
+
+class NotInNad(FakeUpstream):
+    """Census places the address in a county missing from NAD."""
+
+    async def resolve_coverage(self, lat, lon, county=None, state=None):
+        return {"method": "point", "county": "Maricopa", "state": "AZ", "status_code": 0, "status": "No data", "in_nad": False}
+
+
+class OtherStreetOverture(EmptyOverture):
+    """Overture has address points nearby, none on this street."""
+
+    async def query(self, bbox, number=None, limit=5000, timeout=None, any_part=False, theme="addresses"):
+        if theme == "addresses" and number is None:
+            from app.overture import overture_record
+            return [overture_record({"id": "a1", "number": "5", "street": "N 17th Ave", "lon": ORIGIN[1], "lat": ORIGIN[0]})]
+        return await super().query(bbox, number, limit, timeout, any_part, theme)
+
+
+def test_listing_after_an_adopted_overture_miss_says_one_answer():
+    # NAD has no data there and Overture's not_found was adopted; then a business listing verifies it
+    text = "1716 W Washington St, Phoenix, AZ 85007"
+    r = asyncio.run(verify_address(NotInNad(), parse_oneline(text), overture=OtherStreetOverture()))
+    assert r["data_source"] == "overture" and r["fallback"]["adopted"]  # without the listing
+    place = _place("1716 W Washington St", locality="Phoenix", postcode="85007", region="AZ", lat=ORIGIN[0], lon=ORIGIN[1])
+    r = asyncio.run(verify_address(NotInNad(), parse_oneline(text), overture=OtherStreetOverture([place])))
+    assert r["status"] == "verified" and r["data_source"] == "overture_places" and r["nad_status"] == "not_covered"
+    assert r["fallback"]["status"] == "not_found" and not r["fallback"]["adopted"] and r["fallback"]["places"]["adopted"]
+    assert [n for n in r["notes"] if "answered from" in n] == [next(n for n in r["notes"] if "places: 'Walmart'" in n)]
+    assert "Overture fallback (2026-09-23.1) returned 'not_found'" in r["notes"]
 
 
 def _street_notes(text):
