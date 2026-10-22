@@ -24,8 +24,9 @@ if TYPE_CHECKING:
 STREET_PROBE_RADIUS_M = 300
 
 DISCLAIMER = (
-    "NAD / Overture confirm that an address point physically exists according to the addressing "
-    "authority behind each record; they do not confirm USPS deliverability."
+    "NAD / Overture addresses confirm that an address point physically exists according to the addressing "
+    "authority behind each record; an Overture places match only shows that a business lists the address. "
+    "None of them confirms USPS deliverability."
 )
 
 # Higher = more useful answer. Used to decide whether the Overture result replaces the NAD one.
@@ -400,6 +401,18 @@ async def _overture_phase(ov: "OvertureClient", pa: ParsedAddress, keys: list[St
     return dec, release
 
 
+async def _places_phase(ov: "OvertureClient", pa: ParsedAddress, keys: list[StreetKey], ref_zip: str,
+                        origin: tuple[float, float] | None, extent: dict | None, max_candidates: int) -> Decision:
+    """Businesses whose listed address is this one. Only a match counts: most addresses have no business, so a miss
+    says nothing, and other businesses on the street are no evidence about this number."""
+    bbox = bbox_around(*origin, config.OVERTURE_SEARCH_RADIUS_M) if origin else extent
+    recs = await ov.query(bbox, number=pa.house.number, theme="places")
+    # the query matched the number anywhere after a comma of the free text; the number read from it must be this one
+    recs = [r for r in recs if r["address_number_int"] == pa.house.number]
+    scored = _rank([score_candidate(r, pa, keys, origin, ref_zip) for r in recs])
+    return decide(pa, scored, [], dataset="Overture places", ref_zip=ref_zip, max_candidates=max_candidates)
+
+
 # --------------------------------------------------------------------------------------- main
 
 
@@ -596,6 +609,35 @@ async def verify_address(
             else:
                 notes.append(f"Overture fallback ({info['release']}) returned '{ov_dec.status}'; kept the NAD result")
         timings["overture"] = round((time.perf_counter() - t) * 1000, 1)
+
+        # ---- 4. Overture places: a business listed at this address. New industrial parks and warehouses are
+        # listed long before NAD or TIGER has their streets (1410 United Dr, Shippensburg, PA). Not asked when the
+        # addresses query just failed: the same S3 / DuckDB would cost a second timeout.
+        if out["status"] in FALLBACK_TRIGGERS and info["error"] is None:
+            places: dict[str, Any] = {"provider": "overture_places", "release": info["release"],
+                                      "triggered_by": out["status"], "status": None, "adopted": False, "error": None}
+            info["places"] = places
+            t = time.perf_counter()
+            try:
+                pl_dec = await _places_phase(overture, pa, keys, ref_zip, origin, extent, max_candidates)
+            except UpstreamError as exc:
+                places["error"] = exc.message
+                notes.append(f"Overture places fallback failed: {exc.message}")
+            else:
+                places["status"] = pl_dec.status
+                if pl_dec.verified:
+                    places["adopted"], info["adopted"] = True, False
+                    pl_dec.confidence = round(pl_dec.confidence * 0.8, 3)  # a business's own address, not an address point
+                    bm = pl_dec.best_match
+                    src = bm["source"].partition(":")[2]
+                    pl_dec.notes.insert(0, f"neither NAD nor Overture addresses has this address; answered from Overture "
+                                           f"Maps {info['release']} places: '{bm['place']['name']}'"
+                                           + (f" ({src})" if src else "") + " is listed at it, which shows a business "
+                                           "uses the address, not that an addressing authority recorded it")
+                    apply(pl_dec, "overture_places")
+                else:
+                    notes.append(f"Overture places ({info['release']}) has no business listed at this address either")
+            timings["overture_places"] = round((time.perf_counter() - t) * 1000, 1)
 
     if street_unknown and out["status"] == "not_found":
         out.update(status="geocode_failed", confidence=0.0)

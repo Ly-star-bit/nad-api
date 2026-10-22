@@ -240,7 +240,8 @@ async def countries():
         return {"key": key, "name": p.name, "authority": p.authority, "license": p.license}
     us = {"code": "US", "name": "美国", "providers": [
         {"key": "nad", "name": "USDOT National Address Database", "authority": "official", "license": "Public domain"},
-        {"key": "overture", "name": "Overture Maps", "authority": "overture", "license": "per source"}]}
+        {"key": "overture", "name": "Overture Maps", "authority": "overture", "license": "per source"},
+        {"key": "overture_places", "name": "Overture Maps places", "authority": "business", "license": "CDLA-Permissive-2.0"}]}
     return [us] + [{"code": c.code, "name": c.zh, "providers": [prov(k) for k in c.providers]}
                    for c in sorted(COUNTRIES.values(), key=lambda c: (c.code != "JP", c.code))]
 

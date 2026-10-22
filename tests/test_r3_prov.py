@@ -44,7 +44,7 @@ def _client(monkeypatch, fail=lambda bbox, number: "query timed out after 20s"):
     async def release(refresh=False):
         return "2026-09-23.1"
 
-    async def run(release, bbox, number, limit, timeout, any_part=False):
+    async def run(release, bbox, number, limit, timeout, any_part=False, theme="addresses"):
         runs.append((bbox["xmin"], number))
         await asyncio.sleep(0.01)
         if msg := fail(bbox, number):

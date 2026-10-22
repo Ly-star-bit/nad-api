@@ -1,4 +1,4 @@
-"""Overture Maps addresses client.
+"""Overture Maps client: addresses, and places (business listings) for the last US fallback.
 
 Overture publishes ~125M US address points (NAD, OpenAddresses county/city sources, ...) as
 GeoParquet on a public S3 bucket. DuckDB reads only the row groups whose bbox statistics overlap
@@ -20,6 +20,7 @@ import duckdb
 import httpx
 
 from . import config
+from .address import extract_unit, parse_house_number
 from .upstream import TTLCache, UpstreamError, _describe, _s
 
 log = logging.getLogger(__name__)
@@ -85,6 +86,42 @@ def overture_record(row: dict) -> dict:
         "source": f"overture:{dataset}" if dataset else "overture",
         "license": row.get("license"),
     }
+
+
+def place_record(row: dict) -> dict:
+    """Map an Overture place (a business listing) onto the same record shape. Its street address is one line of
+    free text: '1410 United Dr', '4532 United Dr Ste 100', 'Weis Market, 1075 W King St' (the part with the number)."""
+    free = _s(row.get("freeform")) or ""
+    parts = [p.strip() for p in free.split(",")]
+    first = next((i for i, p in enumerate(parts) if parse_house_number(p)[0]), 0)
+    line, _, unit = extract_unit(", ".join(parts[first:]))
+    house, street = parse_house_number(line)
+    street = street.split(",")[0].strip() or None
+    locality, region, dataset = _s(row.get("locality")), _s(row.get("region")), row.get("dataset")
+    rec = overture_record({"id": row.get("id"), "number": house.raw if house else None, "street": street,
+                           "unit": unit or None, "postcode": row.get("postcode"), "postal_city": locality,
+                           "lon": row.get("lon"), "lat": row.get("lat"), "dataset": dataset,
+                           "license": row.get("license"), "update_time": row.get("update_time")})
+    name = _s(row.get("name"))
+    line1 = " ".join(p for p in (rec["address_number"], street) if p)
+    rec.update(state=region, municipality=locality, landmark=name,
+               formatted=", ".join(p for p in (name, line1, unit, locality, " ".join(p for p in (region, rec["zip"]) if p))
+                                   if p),
+               source=f"overture_places:{dataset}" if dataset else "overture_places",
+               place={"name": name, "category": row.get("category"), "confidence": row.get("confidence"),
+                      "operating_status": row.get("operating_status")})
+    return rec
+
+
+# what each theme's query reads, and where the house number is
+_THEMES = {
+    "addresses": ("theme=addresses/type=address", "number", """id, number, street, unit, postcode, postal_city,
+                   address_levels, bbox.xmin AS lon, bbox.ymin AS lat"""),
+    "places": ("theme=places/type=place", "addresses[1].freeform", """id, names.primary AS name,
+                addresses[1].freeform AS freeform, addresses[1].locality AS locality, addresses[1].postcode AS postcode,
+                addresses[1].region AS region, basic_category AS category, confidence, operating_status,
+                bbox.xmin AS lon, bbox.ymin AS lat"""),
+}
 
 
 class OvertureClient:
@@ -175,15 +212,18 @@ class OvertureClient:
     # ------------------------------------------------------------------ queries
 
     async def query(self, bbox: dict, number: int | None = None, limit: int = 5000,
-                    timeout: float | None = None, any_part: bool = False, breaker: list | None = None) -> list[dict]:
+                    timeout: float | None = None, any_part: bool = False, breaker: list | None = None,
+                    theme: str = "addresses") -> list[dict]:
         """Address points inside bbox (lon/lat degrees), optionally only those whose number starts
         with `number` (exact int/suffix matching happens in the matcher). `any_part` also takes the number after
         a '/' (Slovak and Czech "553/25": building 553, street number 25). `breaker`: the caller's own [timed-out
         queries in a row, closed until] instead of this client's (slow 20 km European street boxes must not switch
-        off the US fallback)."""
+        off the US fallback). `theme="places"` reads business listings instead, by the number their address
+        starts with (or that follows a comma: 'Weis Market, 1075 W King St')."""
         for attempt in range(2):
             release = await self.release(refresh=attempt > 0)
-            key = json.dumps([release, {k: round(v, 6) for k, v in bbox.items()}, number, limit] + ([1] if any_part else []))
+            key = json.dumps([release, {k: round(v, 6) for k, v in bbox.items()}, number, limit] + ([1] if any_part else [])
+                             + ([theme] if theme != "addresses" else []))
             cached = self.cache.get(key)
             if cached is not None:
                 return cached
@@ -193,7 +233,7 @@ class OvertureClient:
                 if (breaker[1] if breaker is not None else self._closed_until) > time.monotonic():
                     raise UpstreamError("overture", "not asked: it timed out 3 times in a row within the last minute")
                 task = asyncio.create_task(self._run(release, bbox, number, limit, timeout or config.OVERTURE_TIMEOUT_S,
-                                                     any_part))
+                                                     any_part, theme))
                 self._inflight[key] = task
                 task.add_done_callback(lambda t, k=key, b=breaker: self._settle(k, t, b))
             try:
@@ -206,7 +246,7 @@ class OvertureClient:
                 self._mark(exc.message)
                 raise
             self._mark(None)
-            recs = [overture_record(r) for r in rows]
+            recs = [(place_record if theme == "places" else overture_record)(r) for r in rows]
             self.cache.set(key, recs)
             return recs
         raise UpstreamError("overture", "release unavailable")
@@ -225,25 +265,28 @@ class OvertureClient:
             self._fails, self._closed_until = fails, until
 
     async def _run(self, release: str, bbox: dict, number: int | None, limit: int, timeout: float,
-                   any_part: bool = False) -> list[dict]:
+                   any_part: bool = False, theme: str = "addresses") -> list[dict]:
         if not _RELEASE_RE.match(release):
             raise UpstreamError("overture", f"invalid release '{release}'")
-        src = f"s3://{config.OVERTURE_BUCKET}/release/{release}/theme=addresses/type=address/*.parquet"
+        path, num_col, cols = _THEMES[theme]
+        src = f"s3://{config.OVERTURE_BUCKET}/release/{release}/{path}/*.parquet"
         sql = f"""
-            SELECT id, number, street, unit, postcode, postal_city, address_levels,
-                   bbox.xmin AS lon, bbox.ymin AS lat,
+            SELECT {cols},
                    sources[1].dataset AS dataset, sources[1].license AS license,
                    sources[1].update_time AS update_time
             FROM read_parquet('{src}')
             WHERE bbox.xmin BETWEEN ? AND ? AND bbox.ymin BETWEEN ? AND ?
-            {"AND regexp_matches(number, ?)" if number is not None and any_part else
-             "AND number LIKE ? AND regexp_matches(number, ?)" if number is not None else ""}
+            {f"AND regexp_matches({num_col}, ?)" if number is not None and any_part else
+             f"AND {num_col} LIKE ? AND regexp_matches({num_col}, ?)" if number is not None else ""}
             ORDER BY (bbox.xmin - ?) ^ 2 + (bbox.ymin - ?) ^ 2
             LIMIT {int(limit)}
         """
         params: list[Any] = [bbox["xmin"], bbox["xmax"], bbox["ymin"], bbox["ymax"]]
         if number is not None and any_part:
             params += [f"^([0-9]+/)?{int(number)}([^0-9]|$)"]
+        elif number is not None and theme == "places":
+            # "1410 United Dr" or "Weis Market, 1075 W King St", but not "Suite 1410"
+            params += [f"%{int(number)}%", rf"(^|,\s*){int(number)}([^0-9]|$)"]
         elif number is not None:
             # "1" must match "1", "1A", "1 1/2" but not "10" / "1600" (dense areas would hit LIMIT otherwise)
             params += [f"{int(number)}%", f"^{int(number)}([^0-9]|$)"]
@@ -289,13 +332,15 @@ class OvertureClient:
     async def warmup(self, retry_after_s: tuple[float, ...] = (60.0, 300.0)) -> None:
         """Prime DuckDB's Parquet metadata cache so the first real fallback isn't the slow one. It runs in the
         background with its own, longer timeout (a server far from us-west-2 can need minutes for the ~43 MB of
-        metadata) and is retried; any success also clears a failure shown by /health."""
+        metadata) and is retried; any success also clears a failure shown by /health. Addresses first, then
+        places: a retry finds the addresses answer cached."""
         for attempt, delay in enumerate((0.0, *retry_after_s)):
             await asyncio.sleep(delay)
             try:
                 t = time.perf_counter()
-                await self.query({"xmin": -112.10, "ymin": 33.44, "xmax": -112.09, "ymax": 33.45}, number=1, limit=1,
-                                 timeout=config.OVERTURE_WARMUP_TIMEOUT_S)
+                for theme in ("addresses", "places"):
+                    await self.query({"xmin": -112.10, "ymin": 33.44, "xmax": -112.09, "ymax": 33.45}, number=1, limit=1,
+                                     timeout=config.OVERTURE_WARMUP_TIMEOUT_S, theme=theme)
                 log.info("overture warm-up done in %.1fs (release %s)", time.perf_counter() - t, self._release)
                 return
             except Exception as exc:  # never block startup on the fallback

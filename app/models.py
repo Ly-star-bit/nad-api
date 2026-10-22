@@ -36,7 +36,8 @@ STATUS_DOC = """结论：
 # model-level example would have its keys sorted (status after best_match)
 VERIFY_EXAMPLE = json.loads((Path(__file__).parent / "verify_example.json").read_text(encoding="utf-8"))
 
-CONFIDENCE_DOC = ("置信度 0–1，就是 `best_match.match.score`，再按情况打折：美国 NAD 查不到、用 Overture 补查到的 × 0.9；"
+CONFIDENCE_DOC = ("置信度 0–1，就是 `best_match.match.score`，再按情况打折：美国 NAD 查不到、用 Overture 补查到的 × 0.9，"
+                  "Overture 地址数据也没有、按 Overture 商户数据补查到的 × 0.8；"
                   "单元没找到 × 0.9；门牌后缀不同 × 0.85（美国）。美国以外还有：邮编和记录不一致 × 0.9、地址里没写城市和"
                   "邮编 × 0.9、门牌落在记录的号段内（12 在 10-14 里）× 0.95、这个门牌只有带附加号的记录（Damrak 8 只有 "
                   "8-A、8-B）× 0.9。`street_only` 固定 0.3，`not_found` 为 0.05，其余没有匹配的结论为 0。日本：到号 0.95、"
@@ -84,7 +85,9 @@ class NadRecord(BaseModel):
     """一条地址记录。美国是 NAD 记录（或 Overture 记录，结构相同）；美国以外各数据源的记录也套用这个结构，
     没有的字段为 null 或空对象。美国记录另外带着 NAD 的原始字段：`address_number_int`、`address_number_prefix`、
     `address_number_suffix`、`postal_city`（邮政城市名）、`municipality`、`zip4`、`landmark`、`address_type`、
-    `lifecycle`、`delivery_type`、`address_authority`（地址主管机构）。"""
+    `lifecycle`、`delivery_type`、`address_authority`（地址主管机构）。Overture 商户记录（`source` 是 `overture_places:<数据集>`）
+    另有 `place`：`name` 商户名、`category` 类别、`confidence`（Overture 估计这家商户存在的概率 0–1）、`operating_status`
+    （`open`、`temporarily_closed`、`permanently_closed`）；商户名也在 `landmark` 和 `formatted` 开头。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -105,7 +108,8 @@ class NadRecord(BaseModel):
     address_class: str | None = Field(description="NAD 的地址类别")
     updated: str | None = Field(description="记录更新日期")
     source: str | None = Field(description="提供这条记录的机构：NAD 是提交数据的州 / 县；Overture 记录是 "
-                                           "`overture:<数据集>`；日本是 `国土地理院`")
+                                           "`overture:<数据集>`，Overture 商户记录是 `overture_places:<数据集>`"
+                                           "（meta、BrightQuery 等）；日本是 `国土地理院`")
     license: str | None = Field(None, description="数据许可（Overture 和美国以外的记录）")
 
 
@@ -137,6 +141,11 @@ class FallbackInfo(BaseModel):
     status: Status | None = Field(description="补查数据源自己的结论")
     adopted: bool = Field(description="true：最终结论用的是补查结果")
     error: str | None = Field(None, description="补查失败的原因，或前面哪些数据源没有回答")
+    places: FallbackInfo | None = Field(None, description="美国：Overture 地址数据补查后仍没有核实时，再查 Overture 商户数据"
+                                                        "（places）的记录，字段同上：`provider` 是 `overture_places`，"
+                                                        "`triggered_by` 是查商户前的结论。只有查到门牌和街道都对得上的商户才采用，"
+                                                        "这时外层 `adopted` 为 false。没查商户时为 null（Overture 地址查询失败，"
+                                                        "或地址数据已经核实）；美国以外为 null")
 
 
 class ProviderInfo(BaseModel):
@@ -180,7 +189,8 @@ class VerifyResponse(BaseModel):
         description="核实到哪一级：`unit` 单元、`address` 门牌、`block` 只到番（日本，数据里没有号）、"
                     "`street` 只有街道（`street_only`）；没有匹配时为 null")
     confidence: float = Field(description=CONFIDENCE_DOC)
-    data_source: str | None = Field(description="最终结论来自哪个数据集：美国是 `nad` 或 `overture`；"
+    data_source: str | None = Field(description="最终结论来自哪个数据集：美国是 `nad`、`overture` 或 "
+                                                "`overture_places`（商户登记的地址，不是地址点）；"
                                                 "美国以外是数据源代码（`fr_ban`、`nl_pdok`、`jp_gsi`、`overture`、`osm` 等，"
                                                 "见 `/countries`）；`upstream_error` 时为 null")
     country: str = Field("US", description="按哪个国家核验的（ISO 代码）")
@@ -216,7 +226,8 @@ class VerifyResponse(BaseModel):
 class CountryProvider(BaseModel):
     key: str
     name: str
-    authority: Literal["official", "overture", "osm"]
+    authority: Literal["official", "overture", "osm", "business"] = Field(
+        description="同 `provider.authority`；另有 `business`：商户登记的地址（美国的 Overture 商户数据），不是地址点")
     license: str
 
 

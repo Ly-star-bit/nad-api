@@ -155,12 +155,40 @@ def test_city_search_finds_a_street_missing_from_tiger():
 
 
 def test_street_missing_everywhere_is_unknown_not_absent():
-    # 1410 United Dr, Shippensburg, PA: a new building on a new street that no dataset has yet
+    # 1410 United Dr, Shippensburg, PA: a new building on a new street that no address dataset has yet
     up = NotInTiger([])
     r = run(up, "28869 Nosuch Dr NW, Madison, AL")
     assert r["status"] == "geocode_failed" and r["nad_status"] == "not_found"
     assert any("newer than the data" in n and "ZIP areas of Madison, AL" in n for n in r["notes"])
     assert up.wheres[-1] == "St_Name LIKE '%NOSUCH%'"  # asked whether the street itself is there
+
+
+def _place(freeform, name="Walmart"):
+    from app.overture import place_record
+    return place_record({"id": "p1", "name": name, "freeform": freeform, "locality": "Shippensburg",
+                         "postcode": "17257-9552", "region": "PA", "category": "shopping", "confidence": 0.92,
+                         "operating_status": "open", "lon": -77.5274, "lat": 40.0150, "dataset": "meta"})
+
+
+def test_business_listed_at_the_address_verifies_it():
+    # 1410 United Dr, Shippensburg, PA: on a new street no address dataset has, but Overture lists a business there
+    for text, score in (("1410 United Dr, Shippensburg, PA 17257", 0.95), ("1410 United Dr, Shippensburg, PA", 0.9)):
+        r = asyncio.run(verify_address(NotInTiger([]), parse_oneline(text), overture=EmptyOverture([_place("1410 United Dr")])))
+        assert r["status"] == "verified" and r["data_source"] == "overture_places" and r["nad_status"] == "not_found"
+        assert r["confidence"] == round(score * 0.8, 3)
+        assert r["best_match"]["place"]["name"] == "Walmart" and r["best_match"]["source"] == "overture_places:meta"
+        assert not r["fallback"]["adopted"] and r["fallback"]["places"]["triggered_by"] == "not_found"
+        assert r["fallback"]["places"]["adopted"] and r["fallback"]["places"]["status"] == "verified"
+        assert r["parsed"]["source"] == "record" and r["parsed"]["city"] == "Shippensburg"
+        assert any("'Walmart' (meta) is listed at it" in n for n in r["notes"])
+
+
+def test_business_on_another_street_or_number_proves_nothing():
+    for place in ("1410 Walnut Bottom Rd", "1400 United Dr"):
+        ov = EmptyOverture([_place(place)])
+        r = asyncio.run(verify_address(NotInTiger([]), parse_oneline("1410 United Dr, Shippensburg, PA 17257"), overture=ov))
+        assert r["status"] == "geocode_failed" and r["data_source"] == "nad" and r["best_match"] is None, place
+        assert r["fallback"]["places"]["status"] == "not_found" and not r["fallback"]["places"]["adopted"]
 
 
 def test_other_numbers_on_the_street_make_it_street_only():
@@ -202,20 +230,27 @@ def test_zip_area_is_searched_for_the_street_when_census_misses():
 
 
 class EmptyOverture:
-    """Overture with no address points in the area (Savannah, GA)."""
+    """Overture with no address points in the area (Savannah, GA); `places` are its business listings."""
+
+    def __init__(self, places=()):
+        self.places, self.themes = list(places), []
 
     async def release(self, refresh=False):
         return "2026-09-23.1"
 
-    async def query(self, bbox, number=None, limit=5000, timeout=None, any_part=False):
-        return []
+    async def query(self, bbox, number=None, limit=5000, timeout=None, any_part=False, theme="addresses"):
+        self.themes.append(theme)
+        return self.places if theme == "places" else []
 
 
 def test_overture_miss_over_an_area_keeps_not_covered():
     # Georgia is not in NAD and Overture has nothing around Port Wentworth: still "can't tell", not "doesn't exist"
-    up = NotInTiger([], in_nad=False)
-    r = asyncio.run(verify_address(up, parse_oneline("120 CROSSGATE DR,PORT WENTWORTH,GA US"), overture=EmptyOverture()))
+    up, ov = NotInTiger([], in_nad=False), EmptyOverture()
+    r = asyncio.run(verify_address(up, parse_oneline("120 CROSSGATE DR,PORT WENTWORTH,GA US"), overture=ov))
     assert r["status"] == "not_covered" and r["fallback"]["status"] == "not_found" and not r["fallback"]["adopted"]
+    # no business listed there either: a places miss says nothing about the address
+    assert ov.themes == ["addresses", "places"] and r["fallback"]["places"]["status"] == "not_found"
+    assert not r["fallback"]["places"]["adopted"] and r["data_source"] == "nad"
 
 
 def _street_notes(text):

@@ -19,7 +19,7 @@ export const STATUS = {
 };
 // Short names for the result tables; the full provider name comes with each result (r.provider.name).
 export const SOURCE = {
-  nad: 'NAD', overture: 'Overture', osm: 'OSM', jp_gsi: '国土地理院', fr_ban: 'BAN', nl_pdok: 'BAG', be_register: 'CRAB/ICAR',
+  nad: 'NAD', overture: 'Overture', overture_places: 'Overture 商户', osm: 'OSM', jp_gsi: '国土地理院', fr_ban: 'BAN', nl_pdok: 'BAG', be_register: 'CRAB/ICAR',
   lu_geoportail: 'BD-Adresses', ch_geoadmin: 'GWR', at_bev: 'BEV', es_cartociudad: 'CartoCiudad', no_kartverket: 'Kartverket',
   fi_ryhti: 'Ryhti', is_hms: 'HMS', ee_inads: 'In-ADS', lv_vzd: 'VZD', pl_gugik: 'PRG', cz_ruian: 'RÚIAN', si_gurs: 'GURS',
 };
@@ -48,7 +48,12 @@ export function verdictText(r) {
   const zipFix = zipMismatch(r);
   const zipNote = zipFix ? `但${zipWord(r)}不对：输入的是 ${r.parsed.zip}，记录里是 ${zipFix}。` : '';
   if (!intl(r)) {
-    if (r.status === 'verified') return (r.match_level === 'unit' ? '门牌、街道和单元号都有记录。' : '门牌和街道都有记录。') + zipNote;
+    // a business's listed address (Overture places), not an address point an addressing authority recorded
+    const listing = r.data_source === 'overture_places';
+    if (r.status === 'verified') {
+      if (listing) return '地址库里没有这个地址，但有商户登记在这个门牌（多见于新建仓库、工业园）：依据是商户数据，不是地址点。' + zipNote;
+      return (r.match_level === 'unit' ? '门牌、街道和单元号都有记录。' : '门牌和街道都有记录。') + zipNote;
+    }
     // Census could not place it, so NAD was searched by ZIP / city area (r.geocode.source 'zcta' / 'city')
     const area = r.geocode && (r.geocode.source === 'zcta' || r.geocode.source === 'city');
     const said = (s) => (r.notes || []).some((n) => n.includes(s));

@@ -173,7 +173,7 @@
   "search_radius_m": 300.0,
   "nad_points_nearby": null,
   "notes": [],
-  "disclaimer": "NAD / Overture confirm that an address point physically exists according to the addressing authority behind each record; they do not confirm USPS deliverability.",
+  "disclaimer": "NAD / Overture addresses confirm that an address point physically exists according to the addressing authority behind each record; an Overture places match only shows that a business lists the address. None of them confirms USPS deliverability.",
   "timing_ms": {
     "geocode": 475.0,
     "nad": 541.9,

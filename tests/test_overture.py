@@ -95,14 +95,15 @@ def test_warmup_uses_its_own_timeout_and_retries():
     calls = []
 
     class Client(OvertureClient):
-        async def query(self, bbox, number=None, limit=5000, timeout=None):
-            calls.append(timeout)
-            if len(calls) == 1:
+        async def query(self, bbox, number=None, limit=5000, timeout=None, theme="addresses"):
+            calls.append((theme, timeout))
+            if len(calls) == 2:
                 raise UpstreamError("overture", "query timed out")
             return []
 
     asyncio.run(Client(http=None).warmup(retry_after_s=(0, 0)))
-    assert calls == [config.OVERTURE_WARMUP_TIMEOUT_S] * 2  # failed once, succeeded on the retry, then stopped
+    # places failed once, both ran again on the retry (addresses would be cached), then it stopped
+    assert calls == [(t, config.OVERTURE_WARMUP_TIMEOUT_S) for t in ("addresses", "places") * 2]
 
 
 def test_unit_written_with_its_building():
@@ -182,3 +183,57 @@ def test_invalidated_twice_is_an_upstream_error(monkeypatch):
     with pytest.raises(UpstreamError, match="invalidated"):
         asyncio.run(client._run("2026-10-21.0", {"xmin": 0, "xmax": 1, "ymin": 0, "ymax": 1}, None, 1, 5.0))
     assert len(opened) == 2 and client._con is None  # retried once, and the next query opens a third
+
+
+PLACE = {"id": "08985419-933b-4385-9d9b-73619b75ec0c", "name": "Walmart", "freeform": "1410 United Dr",
+         "locality": "Shippensburg", "postcode": "17257-9552", "region": "PA", "category": "shopping",
+         "confidence": 0.92, "operating_status": "open", "lon": -77.5274, "lat": 40.0150, "dataset": "meta",
+         "license": "CDLA-Permissive-2.0", "update_time": "2026-10-12T00:00:00.000Z"}
+
+
+@pytest.mark.parametrize("freeform, number, street, unit", [
+    ("1410 United Dr", "1410", "United Dr", None),
+    ("4532 United Dr Ste 100", "4532", "United Dr", "Ste 100"),
+    ("1410 United Dr, Ste 100", "1410", "United Dr", "Ste 100"),
+    ("1410 United Dr, Shippensburg", "1410", "United Dr", None),
+    ("Weis Market, 1075 W King St", "1075", "W King St", None),  # the part with the number
+])
+def test_place_freeform_address(freeform, number, street, unit):
+    from app.overture import place_record
+    rec = place_record({**PLACE, "freeform": freeform})
+    assert (rec["address_number"], rec["street"], rec["subaddress"]["unit"]) == (number, street, unit)
+
+
+def test_place_record_mapping():
+    from app.overture import place_record
+    rec = place_record(PLACE)
+    assert rec["formatted"] == "Walmart, 1410 United Dr, Shippensburg, PA 17257"
+    assert (rec["city"], rec["state"], rec["zip"], rec["zip4"]) == ("Shippensburg", "PA", "17257", "9552")
+    assert rec["address_number_int"] == 1410 and rec["source"] == "overture_places:meta" and rec["landmark"] == "Walmart"
+    assert rec["place"] == {"name": "Walmart", "category": "shopping", "confidence": 0.92, "operating_status": "open"}
+    assert place_record({**PLACE, "region": None})["state"] is None  # not the town moved up a level
+
+
+def test_places_and_addresses_are_cached_apart():
+    import asyncio
+
+    from app.overture import OvertureClient
+
+    client, ran = OvertureClient(http=None), []
+
+    async def release(refresh=False):
+        return "2026-10-21.0"
+
+    async def run(release, bbox, number, limit, timeout, any_part=False, theme="addresses"):
+        ran.append(theme)
+        return [PLACE] if theme == "places" else []
+
+    client.release, client._run = release, run
+    box = {"xmin": -77.6, "xmax": -77.4, "ymin": 39.9, "ymax": 40.1}
+
+    async def both():
+        return (await client.query(box, number=1410), await client.query(box, number=1410, theme="places"),
+                await client.query(box, number=1410, theme="places"))
+
+    addresses, places, again = asyncio.run(both())
+    assert addresses == [] and places[0]["landmark"] == "Walmart" and again == places and ran == ["addresses", "places"]

@@ -425,7 +425,7 @@ def test_s42_overture_breaker(monkeypatch):
     async def release(refresh=False):
         return "2026-09-23.1"
 
-    async def run(release, bbox, number, limit, timeout, any_part=False):
+    async def run(release, bbox, number, limit, timeout, any_part=False, theme="addresses"):
         calls.append(number)
         if number != 7:
             raise UpstreamError("overture", "query timed out after 30s")

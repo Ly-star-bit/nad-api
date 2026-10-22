@@ -172,7 +172,8 @@ const form = $('#form'), q = $('#q'), cc = $('#cc'), out = $('#out');
 const key = setupKey($('#keyrow'), $('#key'));
 
 const LEVEL = { unit: '单元', address: '门牌', block: '番（街区）', street: '街道' };
-const TIMING = { geocode: '定位', coverage: '县覆盖', nad: 'NAD', street_probe: '街道探测', overture: 'Overture' };
+const TIMING = { geocode: '定位', coverage: '县覆盖', nad: 'NAD', street_probe: '街道探测', overture: 'Overture',
+  overture_places: 'Overture 商户' };
 const GEO = { census: 'Census', photon: 'OpenStreetMap', gsi: '国土地理院' };  // geocode.source -> who located it
 const geoName = (g) => GEO[g && g.source] || '';
 let countryNames = {};
@@ -444,7 +445,15 @@ function fields(r) {
     const rel = f.release ? `Overture ${esc(f.release)}` : 'Overture';
     add('Overture 补查', f.error ? `${rel} 补查失败：${esc(f.error)}`
       : f.adopted ? `NAD 的结果是「${esc(label(f.triggered_by))}」，采用了 ${rel} 的结果「${esc(label(f.status))}」`
+      : f.places && f.places.adopted ? `${rel} 的结果是「${esc(label(f.status))}」`
       : `${rel} 的结果是「${esc(label(f.status))}」，没有更好，保留 NAD 的结果`);
+    const pl = f.places;
+    if (pl) {
+      add('商户补查', pl.error ? `Overture 商户数据补查失败：${esc(pl.error)}`
+        : pl.adopted ? `地址数据里没有，Overture 商户数据里有商户登记在这个地址（${esc((bm && bm.place && bm.place.name) || '')}），`
+          + `采用「${esc(label(pl.status))}」<span class="na">（商户登记的地址，不是地址点）</span>`
+        : 'Overture 商户数据里也没有商户登记在这个地址');
+    }
   }
   const po = pointOf(r), pt = po && po.point;
   if (pt && po.kind !== 'nearby') add(bm ? '坐标' : '定位点坐标', `<span class="mono">${pt.lat.toFixed(6)}, ${pt.lon.toFixed(6)}</span>`);

@@ -1,7 +1,7 @@
 # NAD Address Verification API
 
 基于 **USDOT National Address Database（NAD）** 的免费美国地址校验接口（FastAPI），
-NAD 查不到时用 **Overture Maps 地址数据** 兜底。**欧洲和日本**的地址查各国官方地址登记（见[欧洲和日本](#欧洲和日本)）。
+NAD 查不到时用 **Overture Maps 地址数据** 兜底，地址数据也没有时再查 **Overture 的商户数据**（新建的仓库、物流园常常只有商户登记）。**欧洲和日本**的地址查各国官方地址登记（见[欧洲和日本](#欧洲和日本)）。
 不需要下载 40 GB 全量数据，也不需要任何 API Key / 账号 —— 所有上游都是公开免费服务。
 
 | 上游 | 用途 | 说明 |
@@ -11,6 +11,7 @@ NAD 查不到时用 **Overture Maps 地址数据** 兜底。**欧洲和日本**�
 | US Census Geocoder | 地址 → 经纬度 + 标准化 + 县 FIPS | TIGER/Line，免费无 Key |
 | Census TIGERweb ZCTA / Places | ZIP 区域范围、城市所在的 ZIP（仅 Census 定位失败时使用） | |
 | **Overture Maps addresses**（AWS 公开 S3 上的 GeoParquet，DuckDB 直接读） | 兜底：美国约 1.25 亿条，含 NAD + OpenAddresses 的县/市原始数据 | 自动使用最新 release，每天检查一次 |
+| **Overture Maps places**（同一个 S3 桶和 release） | 最后一层兜底：商户登记的地址（Meta、BrightQuery 等），不是地址点 | 只有门牌和街道都对得上的商户才采用 |
 
 ## 为什么是“先地理编码、再空间查询”
 
@@ -27,6 +28,7 @@ NAD 查不到时用 **Overture Maps 地址数据** 兜底。**欧洲和日本**�
         → 本地比对街道名(USPS/FGDC 归一化)/单元/ZIP/城市 → 县覆盖状态 → NAD 结论
         → NAD 结论为 not_covered / not_found / street_only / upstream_error 时：
           Overture 按 bbox(1500 m) + 门牌查询 → 同一套比对逻辑 → 结论更好则采用
+        → 仍没有核实时：Overture 商户数据按同一个范围 + 门牌查询 → 有商户登记在这个门牌和街道上则采用
 
 Census 定位失败（新建街道常见，TIGER 里还没有）：
   有 ZIP → 在该 ZIP 范围内查 NAD（Add_Number=N 且街名含输入街名中最长的词）
@@ -89,6 +91,23 @@ OpenAddresses 里各县/市的原始数据，正好补上这些空白。实测�
   按范围查时 Overture 只有找到地址才采用：范围内没有这个门牌往往只是 Overture 在那里没有数据（萨凡纳一带就是），
   不能把 NAD 的 `not_covered`（无法判断）换成 `not_found`。
 
+### Overture 商户兜底
+
+NAD 和 Overture 地址数据都核实不了时（结论仍是 `not_found`、`not_covered`、`street_only` 或 `upstream_error`），再查 Overture 的商户数据（places 主题）：同一个 release、同一个范围（定位点周围 1500 m，或 ZIP / 城市范围），按门牌查商户登记的地址（`1410 United Dr`、`4532 United Dr Ste 100`、`Weis Market, 1075 W King St`），用同一套比对逻辑核对街道、门牌、ZIP 和单元。新建的仓库、配送中心、物流园早就有商户登记，NAD 和 TIGER 却要过几年才有这条街。实测（2026-10-21.0）：
+
+| 地址 | 之前 | 现在 |
+|---|---|---|
+| 1410 United Dr, Shippensburg, PA 17257 | `geocode_failed`（Census、NAD、Overture 地址都没有这条街） | `verified`，Walmart（meta） |
+| 4532 United Dr, Shippensburg, PA 17257 | `geocode_failed` | `verified`，Penske Logistics Distribution Center（BrightQuery） |
+| 500 McCarthy Dr, Lewisberry, PA 17339 | `not_covered`（York 县不在 NAD） | `verified`，PHL5 Amazon Warehouse（meta） |
+| 9300 Olde Scotland Rd, Shippensburg, PA 17257 | `not_covered`（Franklin 县不在 NAD） | `verified`，P&G Northeast Fulfillment Center（meta） |
+| 1400 United Dr, Shippensburg, PA 17257 | `geocode_failed` | `geocode_failed`（没有商户在这个门牌） |
+
+- 只采用查到的：门牌和街道都对得上的商户才算（`verified`，写了单元而商户没有时 `unit_not_found`）。查不到不改变结论 ——大多数地址上没有商户，同一条街上别的商户也不能说明这个门牌存在。
+- 采用时 `confidence × 0.8`，`data_source="overture_places"`，`best_match.source` 是 `overture_places:<数据集>`，`best_match.place` 给出商户名、类别、Overture 估计的存在概率和营业状态；`fallback.places` 记录这一步，`fallback.adopted` 这时为 `false`。
+- 这是商户自己登记的地址，说明有商户在用这个地址，不说明地址主管机构登记过它；`notes` 里写明了依据。
+- Overture 地址查询刚失败（超时、S3 出错）时不查商户，免得同一个故障再等一次超时。启动预热也会读一次商户数据的元数据。
+
 ### Census 定位不到的地址
 
 例：`28869 FANNING DR NW, MADISON, AL` 所在的街道 Census 和 OpenStreetMap 都没有，但 NAD 里有
@@ -104,8 +123,8 @@ OpenAddresses 里各县/市的原始数据，正好补上这些空白。实测�
   - 街上有别的门牌：`street_only`，`suggestions` 给出最接近的门牌（`28899 Fanning Dr NW` → 28869、28860）；
   - 这条街在 NAD 里也没有：返回 `geocode_failed`（`nad_status` 是 `not_found`），`notes` 说明可能是比数据更新的地址，
     或街名写错了。Census 定位不到的地址常常是新街道：`1410 United Dr, Shippensburg, PA` 是新建的
-    沃尔玛物流中心，Census、OpenStreetMap、NAD（坎伯兰县数据截至 2022-08）、Overture 都还没有这条街，
-    说它“不存在”是错的；
+    沃尔玛物流中心，Census、NAD（数据截至 2022-08）、Overture 地址数据都还没有这条街（OpenStreetMap 有街没有门牌），
+    说它“不存在”是错的。这类地址现在多半能由 [Overture 商户兜底](#overture-商户兜底) 核实；商户数据里也没有时才是这个结论；
   - 县不在 NAD 里：`not_covered`。
   街名写法和 NAD 差得太多（`Fifth` / `5th`）时也会落到“没有这条街”。
 - 有些数据提供方把空字段导出成文字 `<Null>`（门牌全称 `28869 <Null>`），按空值处理，Overture 里转载的同样处理。
@@ -333,7 +352,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
   "search_radius_m": 300,
   "nad_points_nearby": null,
   "notes": [],
-  "disclaimer": "NAD / Overture confirm that an address point physically exists ...",
+  "disclaimer": "NAD / Overture addresses confirm that an address point physically exists ...",
   "timing_ms": {"geocode": 664.5, "coverage": 509.7, "nad": 838.8, "total": 1504.1}
 }
 ```
@@ -346,7 +365,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 | `verified` | 地址存在：`status` 是 `verified` 或 `unit_not_found` 时为 `true` |
 | `match_level` | 核实到哪一级：`unit` 单元、`address` 门牌、`block` 只到番（日本，数据里没有号）、`street` 只有街道；没有匹配时为 `null` |
 | `confidence` | 置信度 0–1，见下面的说明 |
-| `data_source` | 最终结论来自哪个数据集：美国是 `nad` 或 `overture`；美国以外是数据源代码（`fr_ban`、`nl_pdok`、`jp_gsi`、`overture`、`osm` 等）；`upstream_error` 时为 `null` |
+| `data_source` | 最终结论来自哪个数据集：美国是 `nad`、`overture` 或 `overture_places`（商户登记的地址，不是地址点）；美国以外是数据源代码（`fr_ban`、`nl_pdok`、`jp_gsi`、`overture`、`osm` 等）；`upstream_error` 时为 `null` |
 | `country` | 按哪个国家核验的（ISO 代码） |
 | `provider` | 美国以外：回答的数据源 `{key, name, authority, url, license, attribution}`。`authority` 是 `official`（官方登记）、`overture` 或 `osm`（社区数据：查到是证据，查不到不能说明地址不存在）；展示数据时要标注 `attribution`。美国为 `null` |
 | `jp` | 日本：`parcel` 是番地式地址（不是丁目-番-号），`go_given` 是输入在番后面写了号或枝番。其他国家为 `null` |
@@ -358,11 +377,11 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 | `best_match` | 匹配到的记录，见下面的说明；没有匹配时为 `null` |
 | `candidates` | 搜索范围内同门牌号的记录，按匹配分排序，最多 5 条（美国包含 `best_match` 本身，例如同一栋楼的其他单元） |
 | `suggestions` | `street_only` 时：同一条街上和输入最接近的门牌，最多 5 条，结构同 `best_match` |
-| `fallback` | 第一个数据源没给出答案、改问下一个时的记录 `{provider, release, triggered_by, status, adopted, error}`：`triggered_by` 是为什么补查，`status` 是补查数据源自己的结论，`adopted` 为 `true` 表示最终结论用的是补查结果。没有补查时为 `null` |
+| `fallback` | 第一个数据源没给出答案、改问下一个时的记录 `{provider, release, triggered_by, status, adopted, error}`：`triggered_by` 是为什么补查，`status` 是补查数据源自己的结论，`adopted` 为 `true` 表示最终结论用的是补查结果。美国另有 `places`：Overture 地址数据也核实不了、再查商户数据的记录，字段相同（`provider` 是 `overture_places`，`triggered_by` 是查商户前的结论），采用商户数据时外层 `adopted` 为 `false`；没查商户时为 `null`。没有补查时 `fallback` 为 `null` |
 | `search_radius_m` | 美国：NAD 最后一次按定位点搜索的半径（米） |
 | `nad_points_nearby` | 美国：定位点附近 NAD 的地址点数，查过同街门牌时才有 |
 | `notes` | 说明（英文）：为什么是这个结论、哪些项不一致、补查情况等 |
-| `disclaimer` | 固定说明：核验的是地址点存在，不是 USPS 能投递 |
+| `disclaimer` | 固定说明：核验的是地址点存在（商户数据只说明有商户登记这个地址），不是 USPS 能投递 |
 | `timing_ms` | 各步耗时（毫秒），`total` 是总耗时 |
 
 **`parsed`**：地址拆成的字段。已核实（美国、欧洲）时按匹配到的记录拆分，拼错的城市、缩写的街道改成记录里的写法
@@ -394,13 +413,13 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 | `city` / `county` / `state` / `zip` | 城市 / 县（仅美国）/ 州或地区代码 / 邮编 |
 | `lat` / `lon` | 坐标 |
 | `placement` / `address_class` / `updated` | NAD 的坐标放置方式、地址类别；记录更新日期 |
-| `source` | 提供这条记录的机构：NAD 是提交数据的州 / 县；Overture 记录是 `overture:<数据集>`；日本是 `国土地理院` |
+| `source` | 提供这条记录的机构：NAD 是提交数据的州 / 县；Overture 记录是 `overture:<数据集>`，Overture 商户记录是 `overture_places:<数据集>`（`meta`、`BrightQuery` 等）；日本是 `国土地理院` |
 | `license` | 数据许可（Overture 和美国以外的记录） |
 | `match` | 和输入逐项比对的结果，见下表 |
 
 美国记录还带着 NAD 的原始字段：`address_number_int`、`address_number_prefix`、`address_number_suffix`、
 `postal_city`（邮政城市名）、`municipality`、`zip4`、`landmark`、`address_type`、`lifecycle`、`delivery_type`、
-`address_authority`（地址主管机构）。
+`address_authority`（地址主管机构）。Overture 商户记录另有 `place`：`name` 商户名、`category` 类别、`confidence`（Overture 估计这家商户存在的概率 0–1）、`operating_status`（`open`、`temporarily_closed`、`permanently_closed`）；商户名也在 `landmark` 和 `formatted` 开头。
 
 | `match` 字段 | 说明（`null` 表示无法比较：输入或记录缺这一项，或数据源不提供） |
 |---|---|
@@ -412,7 +431,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 | `unit_match` | 单元一致；输入没写单元时为 `null` |
 | `distance_m` | 记录离定位点的距离（米）；没有定位点（按 ZIP / 城市范围查、日本）时为 `null` |
 
-**`confidence`**：就是 `best_match.match.score`，再按情况打折：美国 NAD 查不到、用 Overture 补查到的 × 0.9；单元没找到 × 0.9；门牌后缀不同 × 0.85（美国）。美国以外还有：邮编和记录不一致 × 0.9、地址里没写城市和邮编 × 0.9、门牌落在记录的号段内（12 在 10-14 里）× 0.95、这个门牌只有带附加号的记录（Damrak 8 只有 8-A、8-B）× 0.9。`street_only` 固定 0.3，`not_found` 为 0.05，其余没有匹配的结论为 0。日本：到号 0.95、到番 0.7、只到町 0.3，邮编不一致再 × 0.9。打折的原因都写在 `notes` 里。
+**`confidence`**：就是 `best_match.match.score`，再按情况打折：美国 NAD 查不到、用 Overture 补查到的 × 0.9，Overture 地址数据也没有、按 Overture 商户数据补查到的 × 0.8；单元没找到 × 0.9；门牌后缀不同 × 0.85（美国）。美国以外还有：邮编和记录不一致 × 0.9、地址里没写城市和邮编 × 0.9、门牌落在记录的号段内（12 在 10-14 里）× 0.95、这个门牌只有带附加号的记录（Damrak 8 只有 8-A、8-B）× 0.9。`street_only` 固定 0.3，`not_found` 为 0.05，其余没有匹配的结论为 0。日本：到号 0.95、到番 0.7、只到町 0.3，邮编不一致再 × 0.9。打折的原因都写在 `notes` 里。
 
 **`geocode`**：按 `source` 有几种结构。
 
@@ -428,7 +447,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 
 | status | 含义 |
 |---|---|
-| `verified` | 门牌 + 街道（+ 单元）存在（看 `data_source` 是 NAD 还是 Overture） |
+| `verified` | 门牌 + 街道（+ 单元）存在（看 `data_source` 是 NAD、Overture 地址还是 Overture 商户数据） |
 | `unit_not_found` | 楼栋存在，但该单元没有记录（很多数据源不录单元，`notes` 会列出已有单元）；`verified` 仍为 `true` |
 | `street_only` | 附近有这条街，但没有这个门牌；`suggestions` 给出同街最接近的门牌 |
 | `not_found` | 该地区有数据覆盖，但无匹配 —— 较大概率是错误/虚构地址 |
@@ -517,6 +536,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
   因此按点查询时取最小的包含多边形；点查询失败（如纽约县）时退回按县名查询。
 - **Overture 不是权威源**：它是汇总数据，`confidence` 已打 9 折；`source=overture:NAD` 的记录用的 NAD 版本未公开，
   可能与官方 r23 服务不一致，属正常现象。坐标为 float32（约 1 m 精度）。
+- **Overture 商户数据更不是地址库**：地址是商户自己登记的，可能写错或已经过时，所以只在其他数据都核实不了时才用，`confidence` 打 8 折；`best_match.place` 里的存在概率和营业状态可以用来再筛一遍。
 - **Census 会“纠正”方向**：例如把 `200 N Spring St` 匹配成 `200 S SPRING ST`。匹配时以用户输入的方向为准，并在 `notes` 中提示。
 - **NAD ≠ USPS 可投递**：`verified` 只说明物理地址点存在。需要可投递性请再接 USPS/CASS 类服务。
 - 单元号覆盖取决于数据提供方，很多地区只有楼栋点，因此有 `unit_not_found` 这一中间态。
