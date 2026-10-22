@@ -42,6 +42,27 @@ def test_zip4_split():
     assert (rec["zip"], rec["zip4"]) == ("94043", "1351")
 
 
+@pytest.mark.parametrize("number, street, levels, expected", [
+    ("1", "Rātslaukums 1, Rīga, LV-1050", ["Rīga LV-1050"], ("Rātslaukums", "Rīga", None)),
+    ("2C", "Ventas iela 2C, Sigulda, Siguldas nov., LV-2150", ["Siguldas nov. LV-2150", "Sigulda Siguldas nov., LV-2150"],
+     ("Ventas iela", "Sigulda", "Siguldas nov.")),
+    ("21", "Egļu iela 21, Ozolnieki, Ozolnieku pag., Jelgavas nov., LV-3018",
+     ["Ozolnieku pag. Jelgavas nov., LV-3018", "Ozolnieki Ozolnieku pag., Jelgavas nov., LV-3018"],
+     ("Egļu iela", "Ozolnieki", "Jelgavas nov.")),
+    ("7", "Ērgļu iela 7, Jelgava, LV-300", ["Jelgava LV-3007"], ("Ērgļu iela", "Jelgava", None)),  # cut-off postcode
+])
+def test_latvian_rows_carry_the_whole_line_as_the_street(number, street, levels, expected):
+    rec = overture_record({"id": "x", "number": number, "street": street, "postcode": "LV-1050", "dataset": "lv/countrywide",
+                           "address_levels": [{"value": v} for v in levels]})
+    assert (rec["street"], rec["city"], rec["state"]) == expected
+    assert rec["municipality"] == expected[1] and rec["address_number"] == number
+
+
+def test_a_comma_in_a_street_name_is_not_a_whole_line():
+    rec = overture_record({**ROW, "number": "12", "street": "Kalscheurer Weg,Weg S"})  # Köln's allotment paths
+    assert (rec["street"], rec["city"]) == ("Kalscheurer Weg,Weg S", "MOUNTAIN VIEW")
+
+
 def test_decide_on_overture_records():
     pa = parse_oneline("1600 Amphitheatre Pkwy, Mountain View, CA 94043")
     keys = [StreetKey.from_text(pa.street_text)]

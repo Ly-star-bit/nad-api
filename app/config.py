@@ -98,7 +98,7 @@ LV_RESOURCE = os.getenv("LV_RESOURCE", "a510737a-18ce-400f-ad4b-04fce5228272")  
 PL_URL = os.getenv("PL_URL", "https://services.gugik.gov.pl/uug/")
 CZ_URL = os.getenv("CZ_URL", "https://ags.cuzk.gov.cz/arcgis/rest/services/RUIAN/Vyhledavaci_sluzba_nad_daty_RUIAN/"
                              "MapServer/exts/GeocodeSOE/findAddressCandidates")
-SI_URL = os.getenv("SI_URL", "https://ipi.eprostor.gov.si/wfs-si-gurs-kn/ogc/features/collections/SI.GURS.KN:NASLOVI_HS/items")
+SI_URL = os.getenv("SI_URL", "https://ipi.eprostor.gov.si/wfs-si-gurs-rn/ogc/features/collections/SI.GURS.RN:REGISTER_NASLOVOV/items")
 GSI_URL = os.getenv("GSI_URL", "https://msearch.gsi.go.jp/address-search/AddressSearch")
 POSTCODES_IO_URL = os.getenv("POSTCODES_IO_URL", "https://api.postcodes.io")
 JAPANPOST_URL = os.getenv("JAPANPOST_URL", "https://www.post.japanpost.jp/service/search/zipcode/download")

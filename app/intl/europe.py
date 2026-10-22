@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import re
+from typing import Any
 
 from .. import config
 from ..upstream import UpstreamRejected
@@ -162,6 +164,27 @@ def _point(geom: dict | None) -> tuple[float | None, float | None]:
     return (c[0], c[1]) if g.get("type", "Point") == "Point" and len(c) >= 2 and not isinstance(c[0], list) else (None, None)
 
 
+def _d96tm(e: Any, n: Any) -> tuple[float | None, float | None]:
+    """(lon, lat) of a Slovenian D96/TM point (EPSG:3794: transverse Mercator on GRS80, 15° E, k 0.9999; Snyder's
+    inverse series, well under a metre across the country)."""
+    if not isinstance(e, (int, float)) or not isinstance(n, (int, float)):
+        return None, None
+    a, f, k0 = 6378137.0, 1 / 298.257222101, 0.9999
+    e2 = f * (2 - f)
+    ep2, e1 = e2 / (1 - e2), (1 - math.sqrt(1 - e2)) / (1 + math.sqrt(1 - e2))
+    mu = (n + 5_000_000) / k0 / (a * (1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256))
+    p1 = (mu + (3 * e1 / 2 - 27 * e1 ** 3 / 32) * math.sin(2 * mu) + (21 * e1 ** 2 / 16 - 55 * e1 ** 4 / 32) * math.sin(4 * mu)
+          + 151 * e1 ** 3 / 96 * math.sin(6 * mu) + 1097 * e1 ** 4 / 512 * math.sin(8 * mu))
+    s, c, t = math.sin(p1), math.cos(p1), math.tan(p1)
+    c1, t1 = ep2 * c * c, t * t
+    n1, r1 = a / math.sqrt(1 - e2 * s * s), a * (1 - e2) / (1 - e2 * s * s) ** 1.5
+    d = (e - 500_000) / (n1 * k0)
+    lat = p1 - n1 * t / r1 * (d ** 2 / 2 - (5 + 3 * t1 + 10 * c1 - 4 * c1 ** 2 - 9 * ep2) * d ** 4 / 24
+                              + (61 + 90 * t1 + 298 * c1 + 45 * t1 ** 2 - 252 * ep2 - 3 * c1 ** 2) * d ** 6 / 720)
+    lon = (d - (1 + 2 * t1 + c1) * d ** 3 / 6 + (5 - 2 * c1 + 28 * t1 - 3 * c1 ** 2 + 8 * ep2 + 24 * t1 ** 2) * d ** 5 / 120) / c
+    return round(15 + math.degrees(lon), 7), round(math.degrees(lat), 7)
+
+
 def _digits(text: str) -> str:
     m = re.match(r"\d+", text or "")
     return m.group() if m else ""
@@ -207,7 +230,7 @@ INFO.update({
     "pl_gugik": ProviderInfo("pl_gugik", "PRG (GUGiK)", "official", "https://services.gugik.gov.pl/uug/",
                              "Open data", "Główny Urząd Geodezji i Kartografii"),
     "cz_ruian": ProviderInfo("cz_ruian", "RÚIAN (ČÚZK)", "official", "https://ags.cuzk.gov.cz", "CC BY 4.0", "© ČÚZK"),
-    "si_gurs": ProviderInfo("si_gurs", "Register prostorskih enot (GURS)", "official", "https://ipi.eprostor.gov.si",
+    "si_gurs": ProviderInfo("si_gurs", "Register naslovov (GURS)", "official", "https://ipi.eprostor.gov.si",
                             "CC BY 4.0", "Geodetska uprava Republike Slovenije"),
 })
 
@@ -864,7 +887,8 @@ def cz_cands(data: dict) -> list[dict]:
 # ---------------------------------------------------------------------------------------- Slovenia
 
 async def si_gurs(ctx: Ctx, a: IntlAddress) -> Lookup:
-    """GURS's register of house numbers (OGC API Features). Villages have no streets: their name is the street."""
+    """GURS's address register (OGC API Features): one row per flat, so a block of flats comes back many times.
+    Villages have no streets: their name is the street."""
     name = _cql(a.street)
     where = f"(ULICA_NAZIV ILIKE {name} OR (ULICA_NAZIV IS NULL AND NASELJE_NAZIV ILIKE {name}))"
     n, pc = _digits(a.number_base), _pc_digits(a)
@@ -872,13 +896,15 @@ async def si_gurs(ctx: Ctx, a: IntlAddress) -> Lookup:
     elsewhere = False  # the number was found only in other towns: is the street in the postcode given?
     if n:
         for place in ([f"POSTNI_OKOLIS_SIFRA={pc}"] if pc else []) + [""]:
-            cands = si_cands(await _si(ctx, " AND ".join(p for p in (where, f"HS_STEVILKA={n}", place) if p), 50))
+            cands = si_cands(await _si(ctx, " AND ".join(p for p in (where, f"HS_STEVILKA={n}", place) if p), 200))
             if cands:
                 elsewhere = bool(pc) and not place and _elsewhere(cands, a)
                 break
     lk = Lookup(cands=cands)
     if elsewhere or not any(norm_eq(c["number"], a.number_base) for c in cands):
-        street = si_cands(await _si(ctx, " AND ".join(p for p in (where, f"POSTNI_OKOLIS_SIFRA={pc}" if pc else "") if p), 200))
+        # one row per house: flats are numbered from 1 (not in 7 of Maribor's 2323 houses, which then only miss here)
+        flat = "(ST_STANOVANJA IS NULL OR ST_STANOVANJA=1)"
+        street = si_cands(await _si(ctx, " AND ".join(p for p in (where, f"POSTNI_OKOLIS_SIFRA={pc}" if pc else "", flat) if p), 200))
         if not street and not cands:
             raise Skip(f"no street '{a.street}' in the register")
         lk.cands += street
@@ -891,13 +917,18 @@ async def _si(ctx: Ctx, cql: str, limit: int) -> dict:
 
 
 def si_cands(data: dict) -> list[dict]:
-    out = []
+    out, seen = [], set()
     for f in data.get("features") or []:
-        p, (lon, lat) = f.get("properties") or {}, _point(f.get("geometry"))
+        p = f.get("properties") or {}
         if p.get("HS_STEVILKA") is None:
             continue
         number = f"{p['HS_STEVILKA']}{(p.get('HS_DODATEK') or '').lower()}"
         street = p.get("ULICA_NAZIV") or p.get("NASELJE_NAZIV")
+        house = p.get("EID_HISNA_STEVILKA") or (street, number, p.get("POSTNI_OKOLIS_SIFRA"))
+        if house in seen:  # another flat of the same house
+            continue
+        seen.add(house)
+        lon, lat = _d96tm(p.get("E"), p.get("N"))  # the register has no geometry
         out.append(cand("address", number=number, street=street, postcode=p.get("POSTNI_OKOLIS_SIFRA"),
                         city=p.get("POSTNI_OKOLIS_NAZIV"), city_alt=[p.get("NASELJE_NAZIV") or ""], lat=lat, lon=lon,
                         id=p.get("EID_HISNA_STEVILKA"),

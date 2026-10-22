@@ -170,7 +170,7 @@ NAD 和 Overture 地址数据都核实不了时（结论仍是 `not_found`、`no
 | 拉脱维亚 | VZD 国家地址登记（data.gov.lv） | 需要拉脱维亚字母，不带时改用 Overture；`386 k-2`（楼号）按一个门牌查 |
 | 波兰 | PRG（GUGiK） | 需要城市；没有街名的村庄（`Przybysławice 12`）按村名 + 门牌查。机构的邮政编码常和登记里的不同，邮编不一致只作提示 |
 | 捷克 | RÚIAN（ČÚZK） | `151/1a`（建筑号/方位号）写哪一个都能对上；没有街名的村庄按村名 + 建筑号；`Praha 2` 这种区名保留 |
-| 斯洛文尼亚 | GURS 门牌登记 | 没有街名的房子用村名代替街名（有街名的房子不行，`Bled 5` 不会对上布莱德任意一条街的 5 号） |
+| 斯洛文尼亚 | GURS 地址登记（Register naslovov） | 没有街名的房子用村名代替街名（有街名的房子不行，`Bled 5` 不会对上布莱德任意一条街的 5 号） |
 | 德国、意大利、葡萄牙、丹麦、立陶宛、斯洛伐克、克罗地亚、塞尔维亚、列支敦士登、法罗群岛 | Overture Maps（这些国家的官方开放地址登记），先用 Photon（OpenStreetMap 搜索）在写明的城市里找到街道，再沿整条街找门牌 | 德国缺巴伐利亚，那里直接用 OpenStreetMap。葡萄牙的数据只收住宅，商铺门牌常缺，找不到门牌时返回 `not_covered` 而不是“门牌不存在”。斯洛伐克的 `553/25` 写哪个号都能对上 |
 | 英国、爱尔兰、瑞典、希腊、匈牙利、罗马尼亚、海峡群岛、马恩岛、直布罗陀等 | OpenStreetMap（Photon）；英国邮编另用 postcodes.io 核对 | 这些国家没有免费的官方门牌接口。OSM 社区数据，找到门牌算核实（置信度 0.75），找不到门牌**不算证据**：返回 `not_covered`（无法判断），只有连街道都找不到才是 `not_found` |
 | 日本 | 国土地理院住所検索 + 日本邮政邮编表 | 见下 |
@@ -365,7 +365,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 | `verified` | 地址存在：`status` 是 `verified` 或 `unit_not_found` 时为 `true` |
 | `match_level` | 核实到哪一级：`unit` 单元、`address` 门牌、`block` 只到番（日本，数据里没有号）、`street` 只有街道；没有匹配时为 `null` |
 | `confidence` | 置信度 0–1，见下面的说明 |
-| `data_source` | 最终结论来自哪个数据集：美国是 `nad`、`overture` 或 `overture_places`（商户登记的地址，不是地址点）；美国以外是数据源代码（`fr_ban`、`nl_pdok`、`jp_gsi`、`overture`、`osm` 等）；`upstream_error` 时为 `null` |
+| `data_source` | 最终结论来自哪个数据集：美国是 `nad`、`overture` 或 `overture_places`（商户登记的地址，不是地址点）；美国以外是数据源代码（`fr_ban`、`nl_pdok`、`jp_gsi`、`overture`、`osm` 等）；`upstream_error` 时，或者一个数据集都没能查（美国：Census 定位不到，又没有 ZIP / 城市范围可查）时为 `null` |
 | `country` | 按哪个国家核验的（ISO 代码） |
 | `provider` | 美国以外：回答的数据源 `{key, name, authority, url, license, attribution}`。`authority` 是 `official`（官方登记）、`overture` 或 `osm`（社区数据：查到是证据，查不到不能说明地址不存在）；展示数据时要标注 `attribution`。美国为 `null` |
 | `jp` | 日本：`parcel` 是番地式地址（不是丁目-番-号），`go_given` 是输入在番后面写了号或枝番。其他国家为 `null` |
@@ -525,7 +525,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 
 ```bash
 .venv/bin/python -m pytest -q tests                      # 离线：解析/归一化、判定流程、Overture 映射、各国数据源的响应解析、网页路由、上游客户端（1905 个）
-.venv/bin/python scripts/smoke_test.py http://127.0.0.1:8000   # 在线：60 个真实地址端到端（美国 21 个，含 Overture 兜底和国家识别；欧洲和日本 39 个）
+.venv/bin/python scripts/smoke_test.py http://127.0.0.1:8000   # 在线：57 个真实地址端到端（美国 18 个，含 Overture 兜底和国家识别；欧洲和日本 39 个）
 ```
 
 ## 已知局限

@@ -207,6 +207,13 @@ def test_provider_records():
     si = europe.si_cands({"features": [{"properties": {"HS_STEVILKA": 5, "ULICA_NAZIV": "Aljaževa cesta", "NASELJE_NAZIV": "Bled",
                                                        "POSTNI_OKOLIS_SIFRA": 4260, "POSTNI_OKOLIS_NAZIV": "Bled"}}]})
     assert si[0]["street_alt"] == [] and si[0]["city_alt"] == ["Bled"]
+    flat = lambda n: {"type": "Feature", "geometry": None, "properties": {  # noqa: E731
+        "HS_STEVILKA": 1, "HS_DODATEK": None, "ST_STANOVANJA": n, "ULICA_NAZIV": "Mestni trg", "NASELJE_NAZIV": "Ljubljana",
+        "POSTNI_OKOLIS_SIFRA": 1000, "POSTNI_OKOLIS_NAZIV": "Ljubljana", "E": 461846, "N": 101234,
+        "EID_HISNA_STEVILKA": "100400000127940454"}}
+    si = europe.si_cands({"features": [flat(1), flat(3)]})  # one row per flat, D96/TM coordinates, no geometry
+    assert len(si) == 1 and si[0]["formatted"] == "Mestni trg 1, 1000 Ljubljana"
+    assert abs(si[0]["lon"] - 14.50696) < 1e-4 and abs(si[0]["lat"] - 46.04984) < 1e-4
     assert europe.is_cands({"features": [{"properties": {"HUSNR": 10, "HEITI_NF": "Laugavegur", "POSTNR": 101}}]})[0]["city"] == "Reykjavík"
     assert europe.fr_ban_cands({"features": [None, "x"]}) == []
     assert europe._cql("100%_x'") == "'100  x'''"

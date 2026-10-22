@@ -26,7 +26,7 @@ CASES = [
     ({"address": "108 Bryant St Unit 32, Mountain View, CA 94041"}, "verified", "overture"),
     ({"address": "200 N Spring St, Los Angeles, CA 90012"}, "verified", "overture"),  # Census says S Spring
     ({"address": "1 Dr Carlton B Goodlett Pl, San Francisco, CA 94102"}, "verified", "overture"),
-    ({"address": "123 Fakestreet Blvd, Phoenix AZ 85007"}, "geocode_failed", None),
+    ({"address": "123 Fakestreet Blvd, Phoenix AZ 85007"}, "geocode_failed", "nad"),  # NAD has no such street in 85007
     ({"address": "106 Quivira Rd, Marquette, KS 67464"}, "verified", "nad"),
     ({"address": "asdkjh qwe zzz"}, "invalid_input", None),
 ]

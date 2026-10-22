@@ -45,11 +45,20 @@ def overture_record(row: dict) -> dict:
     levels = [lv.get("value") for lv in (row.get("address_levels") or []) if lv and lv.get("value")]
     state = levels[0] if levels else None
     # Prefer the municipality level: NAD-derived postal_city carries Phoenix village names ("Capitol").
-    city = (levels[1] if len(levels) > 1 else None) or row.get("postal_city")
+    municipality = levels[1] if len(levels) > 1 else None
+    city = municipality or row.get("postal_city")
     postcode = (row.get("postcode") or "").strip() or None
     zip5, zip4 = (postcode[:5], postcode[6:10] or None) if postcode and len(postcode) > 5 else (postcode, None)
     # Overture copies NAD verbatim, including its "<Null>" text ("28869 <Null>")
     number, street, unit = _s(row.get("number")), _s(row.get("street")), _s(row.get("unit"))
+    head, *tail = [p.strip() for p in (street or "").split(",")]
+    if tail and number and head.lower().endswith(f" {number.lower()}"):
+        # Latvia's rows carry the whole line as the street ("Hollanderu iela 9, Sigulda, Siguldas nov., LV-2150") and
+        # pieces of it run together as the levels ("Sigulda Siguldas nov., LV-2150"): the line is read instead
+        places = [p for p in tail if p and not re.search(r"\d", p)]
+        street = head[: -len(number)].strip() or None
+        municipality = city = places[0] if places else None
+        state = places[-1] if len(places) > 1 else None
     num_int, num_suf = _parse_number(number)
     dataset = row.get("dataset")
     line1 = " ".join(p for p in (number, street) if p)
@@ -68,7 +77,7 @@ def overture_record(row: dict) -> dict:
         "landmark": None,
         "city": city,
         "postal_city": row.get("postal_city"),
-        "municipality": levels[1] if len(levels) > 1 else None,
+        "municipality": municipality,
         "county": None,
         "state": state,
         "zip": zip5,

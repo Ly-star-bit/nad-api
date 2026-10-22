@@ -192,7 +192,8 @@ class VerifyResponse(BaseModel):
     data_source: str | None = Field(description="最终结论来自哪个数据集：美国是 `nad`、`overture` 或 "
                                                 "`overture_places`（商户登记的地址，不是地址点）；"
                                                 "美国以外是数据源代码（`fr_ban`、`nl_pdok`、`jp_gsi`、`overture`、`osm` 等，"
-                                                "见 `/countries`）；`upstream_error` 时为 null")
+                                                "见 `/countries`）；`upstream_error` 时，或者一个数据集都没能查"
+                                                "（美国：Census 定位不到，又没有 ZIP / 城市范围可查）时为 null")
     country: str = Field("US", description="按哪个国家核验的（ISO 代码）")
     provider: ProviderInfo | None = Field(None, description="美国以外：回答的数据源、许可和需要标注的来源；美国为 null")
     jp: dict | None = Field(None, description="日本：`parcel` 是番地式地址（不是丁目-番-号）；`go_given` 是输入在番后面"
