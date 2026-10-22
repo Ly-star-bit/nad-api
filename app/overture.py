@@ -123,10 +123,22 @@ class OvertureClient:
                 self._con = con
             return self._con
 
-    def _cursor(self) -> duckdb.DuckDBPyConnection:
-        con = self._connection()
+    def _cursor(self, con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
         with self._con_lock:
             return con.cursor()
+
+    def _drop_if_invalidated(self, con: duckdb.DuckDBPyConnection, exc: BaseException | None) -> bool:
+        """After a FATAL or INTERNAL error DuckDB invalidates the whole database: every later query on that connection
+        fails with 'database has been invalidated' until it is opened anew. Drop it so the next query opens a new one;
+        the queries sharing it fail too, so only the first drops it (not a connection opened since)."""
+        if exc is None or not (isinstance(exc, (duckdb.FatalException, duckdb.InternalException))
+                               or "has been invalidated" in str(exc)):
+            return False
+        log.error("overture: DuckDB invalidated its database: %s", exc)  # the first one logged is the cause
+        with self._con_lock:
+            if self._con is con:
+                self._con = None
+        return True
 
     async def release(self, refresh: bool = False) -> str:
         """Newest release that has the addresses theme (old releases are deleted from S3)."""
@@ -238,26 +250,41 @@ class OvertureClient:
         params += [(bbox["xmin"] + bbox["xmax"]) / 2, (bbox["ymin"] + bbox["ymax"]) / 2]  # nearest first
 
         async with self._sem:
-            cur = await asyncio.to_thread(self._cursor)
+            for attempt in range(2):
+                con = None
+                try:
+                    con = await asyncio.to_thread(self._connection)
+                    return await self._execute(con, sql, params, timeout)
+                except duckdb.Error as exc:
+                    # an invalidated database is not S3's fault: ask once more on a new connection
+                    if con is not None and self._drop_if_invalidated(con, exc) and attempt == 0:
+                        continue
+                    raise UpstreamError("overture", str(exc).splitlines()[0][:300]) from exc
 
-            def work() -> list[dict]:
-                res = cur.execute(sql, params)
-                cols = [d[0] for d in res.description]
-                return [dict(zip(cols, row, strict=True)) for row in res.fetchall()]
+    async def _execute(self, con: duckdb.DuckDBPyConnection, sql: str, params: list, timeout: float) -> list[dict]:
+        cur = await asyncio.to_thread(self._cursor, con)
 
-            fut = asyncio.ensure_future(asyncio.to_thread(work))
-            try:
-                return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
-            except asyncio.TimeoutError:
-                cur.interrupt()  # wait_for alone would leave the DuckDB thread running
-                raise UpstreamError("overture", f"query timed out after {timeout:.0f}s") from None
-            except duckdb.Error as exc:
-                raise UpstreamError("overture", str(exc).splitlines()[0][:300]) from exc
-            finally:
-                if fut.done():
-                    cur.close()
-                else:  # interrupted after a timeout: close once the thread finishes, and consume its error
-                    fut.add_done_callback(lambda f: (cur.close(), f.cancelled() or f.exception()))
+        def work() -> list[dict]:
+            res = cur.execute(sql, params)
+            cols = [d[0] for d in res.description]
+            return [dict(zip(cols, row, strict=True)) for row in res.fetchall()]
+
+        def consume(f: asyncio.Future) -> None:
+            cur.close()
+            if not f.cancelled():
+                self._drop_if_invalidated(con, f.exception())
+
+        fut = asyncio.ensure_future(asyncio.to_thread(work))
+        try:
+            return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
+        except asyncio.TimeoutError:
+            cur.interrupt()  # wait_for alone would leave the DuckDB thread running
+            raise UpstreamError("overture", f"query timed out after {timeout:.0f}s") from None
+        finally:
+            if fut.done():
+                cur.close()
+            else:  # interrupted after a timeout: close once the thread finishes, and consume its error
+                fut.add_done_callback(consume)
 
     async def warmup(self, retry_after_s: tuple[float, ...] = (60.0, 300.0)) -> None:
         """Prime DuckDB's Parquet metadata cache so the first real fallback isn't the slow one. It runs in the

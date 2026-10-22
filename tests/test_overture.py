@@ -121,3 +121,64 @@ def test_null_text_copied_from_nad_is_empty():
                            "address_levels": [{"value": "AL"}], "dataset": "NAD"})
     assert rec["address_number"] == "28869" and rec["address_number_suffix"] is None
     assert rec["subaddress"]["unit"] is None
+
+
+def _fake_duckdb(monkeypatch, broken: int):
+    """duckdb.connect() opens fake connections; the first `broken` of them were invalidated by a fatal error."""
+    import duckdb
+
+    opened = []
+
+    class Cursor:
+        def __init__(self, ok):
+            self.ok, self.description = ok, [("id",), ("number",)]
+
+        def execute(self, sql, params=None):
+            if not self.ok:
+                raise duckdb.FatalException("FATAL Error: Failed: database has been invalidated because of a previous "
+                                            "fatal error. The database must be restarted prior to being used again.")
+            return self
+
+        def fetchall(self):
+            return [("x", "1410")]
+
+        def close(self):
+            pass
+
+    class Con:
+        def __init__(self):
+            self.ok = len(opened) >= broken
+            opened.append(self)
+
+        def execute(self, sql, params=None):
+            return self
+
+        def cursor(self):
+            return Cursor(self.ok)
+
+    monkeypatch.setattr(duckdb, "connect", Con)
+    return opened
+
+
+def test_invalidated_database_is_reopened(monkeypatch):
+    import asyncio
+
+    from app.overture import OvertureClient
+
+    opened = _fake_duckdb(monkeypatch, broken=1)
+    client = OvertureClient(http=None)
+    rows = asyncio.run(client._run("2026-10-21.0", {"xmin": 0, "xmax": 1, "ymin": 0, "ymax": 1}, None, 1, 5.0))
+    assert rows == [{"id": "x", "number": "1410"}] and len(opened) == 2 and client._con is opened[1]
+
+
+def test_invalidated_twice_is_an_upstream_error(monkeypatch):
+    import asyncio
+
+    from app.overture import OvertureClient
+    from app.upstream import UpstreamError
+
+    opened = _fake_duckdb(monkeypatch, broken=2)
+    client = OvertureClient(http=None)
+    with pytest.raises(UpstreamError, match="invalidated"):
+        asyncio.run(client._run("2026-10-21.0", {"xmin": 0, "xmax": 1, "ymin": 0, "ymax": 1}, None, 1, 5.0))
+    assert len(opened) == 2 and client._con is None  # retried once, and the next query opens a third
