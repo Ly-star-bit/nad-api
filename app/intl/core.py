@@ -66,6 +66,18 @@ PROBES: dict[str, tuple[str, dict]] = {
     "postcodes_io": (f"{config.POSTCODES_IO_URL}/postcodes/SW1A2AA", {}),
 }
 
+
+async def check_sources(ctx: Ctx) -> None:
+    """Ask every source once at start-up (in the background), so one this server can't connect to is skipped from
+    the first address on instead of the first few waiting for its connect timeout."""
+    async def one(service: str, url: str, params: dict) -> None:
+        try:
+            await ctx.get(service, url, params, expect=object)  # Photon's answer is a dict, GSI's a list
+        except UpstreamError:
+            pass
+
+    await asyncio.gather(*(one(s, u, p) for s, (u, p) in PROBES.items()))
+
 DISCLAIMER = ("Checks that the address exists in the country's address register (or, where none is open, in "
               "Overture Maps / OpenStreetMap); it does not confirm that the post office delivers there.")
 

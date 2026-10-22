@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .. import config
-from ..upstream import Upstream, UpstreamError, UpstreamRejected
+from ..upstream import Upstream, UpstreamError, UpstreamRejected, UpstreamUnreachable
 
 if TYPE_CHECKING:
     from ..overture import OvertureClient
@@ -53,33 +53,70 @@ class Ctx:
     def __init__(self, up: Upstream, ov: OvertureClient | None) -> None:
         if not hasattr(up, "intl_sems"):
             up.intl_sems, up.intl_breaker = {}, {}
+        if not hasattr(up, "intl_rechecks"):
+            up.intl_rechecks = {}  # service -> the task asking an unreachable service again
         # (a stand-in without the client's breaker, as in tests, is used as it is)
         self.up, self.ov = up, _Overture(ov, up.intl_breaker) if hasattr(ov, "_settle") else ov
 
     async def get(self, service: str, url: str, params: dict[str, Any], *, expect: type = dict) -> Any:
         """The JSON answer; one of another shape (an error page, a maintenance message) counts as an outage and is
         not kept in the cache. A service that failed 3 times in a row is not asked for a minute (a hung register
-        would otherwise cost every row of a batch its full timeout)."""
+        would otherwise cost every row of a batch its full timeout). One that can't be connected to at all is not
+        asked from its first failure until a check in the background reaches it again: Latvia's register, out of
+        reach from abroad, would otherwise cost every Latvian address the connect timeout before Overture."""
         breaker: dict[str, list[float]] = self.up.intl_breaker
-        if breaker.get(service, (0, 0.0))[1] > time.monotonic():
-            raise UpstreamError(service, "not asked: it failed 3 times in a row within the last minute")
+        self._closed(service)
         cached = self.up.cache.get(self.up._key(url, params)) is not None
-        try:
-            async with self._sem(service):
+        async with self._sem(service):
+            self._closed(service)  # again after the wait: the calls ahead of this one may have found it down
+            try:
                 data = await self.up._get_json(service, url, params)
-        except UpstreamRejected:
-            raise  # it answered (a 4xx about this query)
-        except UpstreamError:
-            # read again after the wait: the calls that failed alongside this one count too
-            fails = breaker.get(service, (0, 0.0))[0] + 1
-            breaker[service] = [fails, time.monotonic() + config.INTL_BREAKER_S if fails >= 3 else 0.0]
-            raise
+            except UpstreamRejected:
+                raise  # it answered (a 4xx about this query)
+            except UpstreamUnreachable:
+                self._unreachable(service, url, params)
+                raise
+            except UpstreamError:
+                # read again after the wait: the calls that failed alongside this one count too
+                fails = breaker.get(service, (0, 0.0))[0] + 1
+                breaker[service] = [fails, time.monotonic() + config.INTL_BREAKER_S if fails >= 3 else 0.0]
+                raise
         if not isinstance(data, expect):
             self.up.forget(url, params)
             raise UpstreamError(service, f"unexpected answer ({type(data).__name__} instead of {expect.__name__})")
         if not cached:  # only a real answer shows the service is back
             breaker.pop(service, None)
         return data
+
+    def _closed(self, service: str) -> None:
+        if self.up.intl_breaker.get(service, (0, 0.0))[1] > time.monotonic():
+            task = self.up.intl_rechecks.get(service)
+            raise UpstreamError(service, f"not asked: it could not be reached; checked again every {config.INTL_BREAKER_S:.0f}s"
+                                if task and not task.done() else "not asked: it failed 3 times in a row within the last minute")
+
+    def _unreachable(self, service: str, url: str, params: dict[str, Any]) -> None:
+        # open for longer than the checks' interval, so it never lapses between two of them; should the checks stop,
+        # it lapses and the next address asks the service itself, as after 3 failures
+        fails = self.up.intl_breaker.get(service, (0, 0.0))[0] + 1
+        self.up.intl_breaker[service] = [fails, time.monotonic() + 2 * config.INTL_BREAKER_S]
+        task = self.up.intl_rechecks.get(service)
+        if task is None or task.done():
+            self.up.intl_rechecks[service] = asyncio.create_task(self._recheck(service, url, params))
+
+    async def _recheck(self, service: str, url: str, params: dict[str, Any]) -> None:
+        """Ask the request that failed again every INTL_BREAKER_S seconds until the service answers (anything at all:
+        a slow or failing service is left to the 3-failure rule)."""
+        while True:
+            await asyncio.sleep(config.INTL_BREAKER_S)
+            try:
+                await self.up._get_json(service, url, params, cache=False)
+            except UpstreamUnreachable:
+                self._unreachable(service, url, params)  # kept closed (this task is the one checking)
+                continue
+            except UpstreamError:
+                pass
+            self.up.intl_breaker.pop(service, None)
+            return
 
     def _sem(self, service: str) -> asyncio.Semaphore:
         sems: dict[str, asyncio.Semaphore] = self.up.intl_sems

@@ -20,6 +20,7 @@ from .intl import COUNTRIES, Ctx, JapanPost, country_in_text, country_name, know
 from .intl.countries import crown_dependency
 from .intl import INFO as INTL_INFO
 from .intl.core import PROBES as INTL_PROBES
+from .intl.core import check_sources
 from .models import (
     ADDRESS_DOC, COUNTRY_DOC, VERIFY_EXAMPLE, BatchItem, BatchRequest, BatchResponse, CountryInfo, ErrorDetail,
     VerifyRequest, VerifyResponse,
@@ -39,8 +40,9 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(app.state.overture.warmup()))  # background; never blocks startup
     app.state.japanpost = JapanPost(app.state.upstream.client, Path(config.DATA_DIR))
     tasks.append(asyncio.create_task(app.state.japanpost.run()))  # loads, refreshes monthly, retries with back-off
+    tasks.append(asyncio.create_task(check_sources(Ctx(app.state.upstream, app.state.overture))))
     yield
-    for t in tasks:
+    for t in [*tasks, *getattr(app.state.upstream, "intl_rechecks", {}).values()]:
         if not t.done():
             t.cancel()
     await app.state.upstream.aclose()
@@ -205,7 +207,8 @@ async def health(request: Request, deep: bool = Query(False, description="立即
             try:
                 await up._get_json(service, url, params, cache=False)  # records the outcome in up.status
             except UpstreamError:
-                pass
+                return
+            getattr(up, "intl_breaker", {}).pop(service, None)  # it answered: addresses may ask it again
 
         _deep["lock"] = _deep["lock"] or asyncio.Lock()
         async with _deep["lock"]:  # concurrent callers share one round of probes

@@ -110,7 +110,8 @@ INTL_CONCURRENCY = _env_int("INTL_CONCURRENCY", 4)
 INTL_SERVICE_CONCURRENCY = {"photon": _env_int("PHOTON_CONCURRENCY", 2)}
 # One address may ask several sources in turn; past this many seconds it is answered upstream_error.
 INTL_TIMEOUT_S = _env_float("NAD_INTL_TIMEOUT_S", 60.0)
-# A source that failed 3 times in a row is skipped for this many seconds.
+# A source that failed 3 times in a row is skipped for this many seconds; one that can't be connected to is skipped
+# from its first failure and asked again in the background this often.
 INTL_BREAKER_S = _env_float("NAD_INTL_BREAKER_S", 60.0)
 # Downloaded reference data (Japan Post postcode tables, refreshed monthly).
 DATA_DIR = os.getenv("NAD_DATA_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"))

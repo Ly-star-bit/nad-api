@@ -204,7 +204,9 @@ NAD 和 Overture 地址数据都核实不了时（结论仍是 `not_found`、`no
   （`Hauptstraße, 80331 München`）仍是 `invalid_input`。
 - 数据源出错、跳过，或官方登记什么都没找到（例如不带当地字母的街名）时问下一个数据源；官方登记什么都没找到时，后面的
   数据源只有街名完全一致才采用（根特没有 `Grote Markt`，Overture 的 `Groentenmarkt 1` 只列为候选）；后面的数据源给不出更好的
-  结论时，仍用前面的结论。同一个数据源连续失败 3 次后一分钟内不再请求它；一个地址最多查 60 秒。
+  结论时，仍用前面的结论。同一个数据源连续失败 3 次后一分钟内不再请求它；连不上的数据源（连接超时、被拒绝）第一次失败
+  就不再请求，直接问下一个，后台每分钟重试一次，连上后恢复。服务启动时会在后台把每个数据源请求一次，所以连不上的数据源
+  从第一个地址起就跳过（拉脱维亚的 VZD 从境外连不上时，拉脱维亚地址直接用 Overture）。一个地址最多查 60 秒。
 
 **日本**：地址是“町 + 丁目 + 番（街区）+ 号（建筑）”，国土地理院返回它知道的最深一级，比对规则：
 
@@ -233,7 +235,8 @@ NAD 和 Overture 地址数据都核实不了时（结论仍是 `not_found`、`no
 - 国土地理院这个检索接口是它自己地图网站用的，没有承诺长期提供。
 
 **注意**：以上都是在美国 IP 上测试的。部署到其他地区后请打开 `/health?deep=true`（会逐个请求每个国家的数据源）并跑一遍
-`scripts/smoke_test.py`，看哪些数据源从服务器上连不通；页头的状态提示也会列出连不通的海外数据源。
+`scripts/smoke_test.py`，看哪些数据源从服务器上连不通；页头的状态提示也会列出连不通的海外数据源。连不通的数据源会自动跳过，
+不会拖慢请求，但对应国家的结论会换成 Overture 或 OpenStreetMap 的。
 斯洛伐克、塞尔维亚、立陶宛的官方接口只对部分国家的 IP 开放，所以这三个国家直接用 Overture。
 Photon 公共实例只要求“合理使用”（每个 worker 并发限制在 2），大批量使用请自建 Photon 并设置 `PHOTON_URL`；
 公共 Nominatim 的使用政策禁止地址校验类服务，所以没有使用。
@@ -514,7 +517,7 @@ curl -X POST localhost:8000/v1/verify -H 'content-type: application/json' \
 | `PHOTON_URL` | `https://photon.komoot.io` | OpenStreetMap 搜索（德国、意大利等定位，英国等 OSM 国家核对）。大批量使用请自建 |
 | `PHOTON_CONCURRENCY` / `INTL_CONCURRENCY` | 2 / 4 | 每个海外数据源同时进行的请求数（每个 worker） |
 | `NAD_INTL_TIMEOUT_S` | 60 | 美国以外的一个地址最多查多久，超时返回 `upstream_error` |
-| `NAD_INTL_BREAKER_S` | 60 | 海外数据源连续失败 3 次后，这么多秒内不再请求它 |
+| `NAD_INTL_BREAKER_S` | 60 | 海外数据源连续失败 3 次后，这么多秒内不再请求它；连不上的数据源每隔这么多秒在后台重试一次 |
 | `NAD_DATA_DIR` | `data/` | 下载的参考数据（日本邮政邮编表） |
 | `FR_BAN_URL`、`NL_PDOK_URL`、`GSI_URL` 等 | 各官方地址 | 每个数据源的地址都可以覆盖（见 `app/config.py`） |
 

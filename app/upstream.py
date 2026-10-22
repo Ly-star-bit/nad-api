@@ -44,6 +44,14 @@ class UpstreamRejected(UpstreamError):
     """The upstream answered but refused the request (HTTP 4xx): the input is the problem, not the service."""
 
 
+class UpstreamUnreachable(UpstreamError):
+    """No connection could be made (no answer to connect, refused, reset during the handshake, no DNS): the service
+    is down or blocks this server, not merely slow."""
+
+
+CONNECT_TIMEOUT_S = 10.0
+
+
 def _describe(exc: BaseException | None) -> str:
     """Name a transport failure. httpx's async ConnectError is empty when the peer resets the connection during
     the TLS handshake (typical of a firewall in the path), so add the innermost exception, which has the OS error."""
@@ -93,7 +101,7 @@ class TTLCache:
 class Upstream:
     def __init__(self) -> None:
         self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(config.HTTP_TIMEOUT, connect=10.0),
+            timeout=httpx.Timeout(config.HTTP_TIMEOUT, connect=CONNECT_TIMEOUT_S),
             headers={"User-Agent": config.USER_AGENT, "Accept": "application/json"},
             limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
             follow_redirects=True,
@@ -148,6 +156,8 @@ class Upstream:
         for attempt in range(2):
             try:
                 resp = await self.client.get(url, params=params)
+            except httpx.ConnectTimeout as exc:
+                raise UpstreamUnreachable(service, f"could not connect within {CONNECT_TIMEOUT_S:.0f}s") from exc
             except httpx.TimeoutException as exc:
                 raise UpstreamError(service, f"timed out after {config.HTTP_TIMEOUT:.0f}s") from exc
             except httpx.TransportError as exc:  # connection reset etc. -> one retry
@@ -175,7 +185,8 @@ class Upstream:
                 detail = "; ".join(err.get("details") or []) or err.get("message") or "unknown error"
                 raise UpstreamError(service, f"ArcGIS error {err.get('code')}: {detail}")
             return data
-        raise UpstreamError(service, f"connection failed: {_describe(last_exc)}")
+        error = UpstreamUnreachable if isinstance(last_exc, httpx.ConnectError) else UpstreamError
+        raise error(service, f"connection failed: {_describe(last_exc)}")
 
     async def ping(self) -> dict[str, str | None]:
         """One uncached call to each upstream except NAD (see nad_count) -> {service: None if it answered, else the error}."""

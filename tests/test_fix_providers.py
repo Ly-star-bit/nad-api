@@ -4,15 +4,17 @@ RÚIAN, Ryhti, geo.admin, Kartverket, Photon + Overture rows), and the verdict i
 import asyncio
 import time
 
+import httpx
 import pytest
 
+from app import config
 from app import overture as ovmod
 from app.intl import core, europe, osm
 from app.intl import countries as C
 from app.intl.base import Ctx, Lookup
 from app.intl.match import decide
 from app.intl.parse import IntlAddress, parse_line
-from app.upstream import TTLCache, Upstream, UpstreamError
+from app.upstream import TTLCache, Upstream, UpstreamError, UpstreamUnreachable
 
 CC = C.COUNTRIES
 
@@ -132,6 +134,92 @@ def test_r62_breaker_counts_each_failure_and_only_a_real_answer_resets_it():
     up.cache.set(Upstream._key("u", {"q": "old"}), {"cached": 1})
     assert asyncio.run(ctx.get("x", "u", {"q": "old"})) == {"cached": 1} and up.intl_breaker["x"] == [2, 0.0]
     assert asyncio.run(ctx.get("x", "u", {"q": "new"})) == {"ok": {"q": "new"}} and "x" not in up.intl_breaker
+
+
+@pytest.mark.parametrize("raised, unreachable", [
+    (httpx.ConnectTimeout("no answer"), True),  # data.gov.lv from outside Latvia
+    (httpx.ConnectError("[Errno 61] Connection refused"), True),
+    (httpx.ReadTimeout("slow"), False),  # connected: the register is there, only slow
+    (httpx.RemoteProtocolError("closed mid-answer"), False),
+])
+def test_a_connection_that_cannot_be_made_is_unreachable(raised, unreachable):
+    def fail(request):
+        raise raised
+
+    async def run():
+        up = Upstream()
+        up.client = httpx.AsyncClient(transport=httpx.MockTransport(fail))
+        try:
+            await up._get_json("lv_vzd", "https://data.gov.lv/x", {"q": 1})
+        finally:
+            await up.aclose()
+
+    with pytest.raises(UpstreamError) as exc:
+        asyncio.run(run())
+    assert isinstance(exc.value, UpstreamUnreachable) is unreachable
+    if isinstance(raised, httpx.ConnectTimeout):
+        assert exc.value.message == "could not connect within 10s"
+
+
+class _Down(_Up):
+    """A service no connection can be made to while `down`; `checks` counts the uncached calls (the rechecks)."""
+
+    def __init__(self):
+        super().__init__(fail=False)
+        self.down, self.checks = True, 0
+
+    async def _get_json(self, service, url, params, cache=True):
+        self.checks += not cache
+        self.calls += 1
+        await asyncio.sleep(0.01)
+        if self.down:
+            raise UpstreamUnreachable(service, "could not connect within 10s")
+        return {"ok": params}
+
+
+def test_an_unreachable_service_is_skipped_from_its_first_failure_until_a_recheck_reaches_it(monkeypatch):
+    monkeypatch.setattr(config, "INTL_BREAKER_S", 0.05)
+    up = _Down()
+    ctx = Ctx(up, None)
+
+    async def run():
+        # a batch: 4 rows in flight at once (INTL_CONCURRENCY), the other 4 queued behind them never send
+        out = await asyncio.gather(*(ctx.get("lv_vzd", "u", {"q": i}) for i in range(8)), return_exceptions=True)
+        assert up.calls == 4 and all(isinstance(e, UpstreamError) for e in out)
+        assert [e.message for e in out[4:]] == ["not asked: it could not be reached; checked again every 0s"] * 4
+        with pytest.raises(UpstreamError, match="could not be reached"):
+            await ctx.get("lv_vzd", "u", {"q": 9})
+        assert up.calls == 4
+        await asyncio.sleep(0.08)  # one recheck, still down: still skipped
+        assert up.checks == 1 and up.intl_breaker["lv_vzd"][1] > time.monotonic()
+        up.down = False
+        await asyncio.sleep(0.08)  # the next recheck reaches it
+        assert "lv_vzd" not in up.intl_breaker and up.intl_rechecks["lv_vzd"].done()
+        assert await ctx.get("lv_vzd", "u", {"q": 10}) == {"ok": {"q": 10}}
+
+    asyncio.run(run())
+
+
+def test_sources_are_checked_once_at_start_up(monkeypatch):
+    class _Probe(_Up):
+        async def _get_json(self, service, url, params, cache=True):
+            self.calls += 1
+            if service == "lv_vzd":
+                raise UpstreamUnreachable(service, "could not connect within 10s")
+            if service == "si_gurs":
+                raise UpstreamError(service, "HTTP 404")
+            return [] if service == "jp_gsi" else {}
+
+    up = _Probe()
+
+    async def run():
+        await core.check_sources(Ctx(up, None))
+        up.intl_rechecks["lv_vzd"].cancel()
+
+    asyncio.run(run())
+    assert up.calls == len(core.PROBES)
+    assert list(up.intl_breaker) == ["lv_vzd", "si_gurs"] and up.intl_breaker["si_gurs"][1] == 0.0  # one failure is not 3
+    assert list(up.intl_rechecks) == ["lv_vzd"]
 
 
 # ------------------------------------------------------------------------------------- Overture / Photon
